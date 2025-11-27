@@ -15,16 +15,17 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # Sessions memory
-SESSIONS = {}
-BUFFER_DELAY = 15  # 15 seconds
+SESSIONS = {}  # { user_id: {"messages": [...], "last_message_time": time } }
+BUFFER_DELAY = 15        # وقت تجميع الرسائل
+MEMORY_TIMEOUT = 900     # 15 دقيقة ذاكرة = 900 ثانية
 
 
-# ---------------------------------------
-#  1) 15-second Message Buffer System
-# ---------------------------------------
+# ---------------------------------------------------------
+# 1) 15-second buffer for merging messages
+# ---------------------------------------------------------
 
 def schedule_reply(user_id):
-    """Wait 15 seconds — if no new messages, process."""
+    """ينتظر 15 ثانية، إذا ما وصلت رسالة جديدة → يجاوب."""
     time.sleep(BUFFER_DELAY)
 
     state = SESSIONS.get(user_id)
@@ -33,44 +34,53 @@ def schedule_reply(user_id):
 
     now = time.time()
 
+    # إذا ماكو رسالة جديدة خلال 15 ثانية → نعالج الرسائل
     if (now - state["last_message_time"]) >= BUFFER_DELAY:
-        messages = state["messages"]
-        final_text = " ".join(messages)
+        combined_text = " ".join(state["messages"])
 
         try:
-            reply = ask_openai(final_text)
+            reply = ask_openai(user_id, combined_text)
         except Exception as e:
             print("❌ OpenAI Error:", e)
             reply = "صار خلل بسيط، حاول مرة ثانية 🙏"
 
         send_message(user_id, reply)
 
-        # Reset session
-        SESSIONS[user_id] = {
-            "messages": [],
-            "last_message_time": 0
-        }
+        # ما نمسح الذاكرة — نخليها إلى أن تمر 15 دقيقة بدون رسائل
+        # التنظيف راح يصير تلقائياً داخل add_user_message()
 
+
+# ---------------------------------------------------------
+# 2) Add message + long-term 15 min memory
+# ---------------------------------------------------------
 
 def add_user_message(user_id, text):
     now = time.time()
 
-    if user_id not in SESSIONS:
-        SESSIONS[user_id] = {"messages": [], "last_message_time": now}
+    # إذا المستخدم جديد أو ذاكرته انتهت → سوّ جلسة جديدة
+    if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT):
+        SESSIONS[user_id] = {
+            "messages": [],
+            "last_message_time": now
+        }
 
+    # إضافة الرسالة الجديدة إلى الذاكرة
     SESSIONS[user_id]["messages"].append(text)
     SESSIONS[user_id]["last_message_time"] = now
 
-    # Start timer thread
+    # تشغيل مؤقت الدمج
     t = threading.Thread(target=schedule_reply, args=(user_id,))
     t.start()
 
 
-# ---------------------------------------
-#  2) OpenAI Handler with NEW PROMPT
-# ---------------------------------------
+# ---------------------------------------------------------
+# 3) OpenAI handler (with full memory context)
+# ---------------------------------------------------------
 
-def ask_openai(user_input):
+def ask_openai(user_id, new_text):
+    # جمع كل تاريخ المحادثة
+    full_context = " | ".join(SESSIONS[user_id]["messages"])
+
     system_prompt = """
 فهمت قصدك، الملاحظة جداً دقيقة. البوت لازم يكون "بياع" شاطر مو مجرد مجيب آلي، ولازم يحسس الزبون إنه محصل فرصة.
 
@@ -119,13 +129,18 @@ def ask_openai(user_input):
 المراجع: "أكو تخفيضات؟" علي: "حالياً أحنا مسوين عروض خاصة والأسعار مخفضة مقارنة بالسوق مع الحفاظ على المواد الأصلية والضمان. تحب تستغل العرض ونحجزلك موعد؟"
 
 المراجع: "بيش التغليف؟" علي: "نستخدم زاركون ألماني بضمان مدى الحياة، وسعره بالعرض حالياً 75 ألف فقط للسن. شغل يبيض الوجه. دزلي اسمك ورقمك للحجز؟"
+▪️ أسلوب الرد:
+- مختصر جدًا
+- لبق
+- يخفف القلق
+- يشرح ببساطة
 """
 
     rsp = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_input}
+            {"role": "user", "content": full_context}
         ],
         max_tokens=250
     )
@@ -133,13 +148,13 @@ def ask_openai(user_input):
     return rsp.choices[0].message.content.strip()
 
 
-# ---------------------------------------
-#  3) Webhook + Facebook sender
-# ---------------------------------------
+# ---------------------------------------------------------
+# 4) Webhook routes
+# ---------------------------------------------------------
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Render bot running with 15s buffer + GoldenLine Prompt ⏳"
+    return "GoldenLine bot running — Memory 15 minutes + Buffer 15 seconds"
 
 
 @app.route("/webhook", methods=["GET"])
@@ -169,6 +184,10 @@ def webhook():
 
     return "OK", 200
 
+
+# ---------------------------------------------------------
+# 5) Send reply to Facebook
+# ---------------------------------------------------------
 
 def send_message(receiver, text):
     url = "https://graph.facebook.com/v18.0/me/messages"
