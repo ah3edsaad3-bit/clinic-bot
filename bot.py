@@ -7,25 +7,30 @@ import threading
 
 app = Flask(__name__)
 
-# Tokens from Environment Variables
+# ==============================
+# 1) Tokens
+# ==============================
+
 VERIFY_TOKEN = "goldenline_secret"
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Sessions memory
-SESSIONS = {}  # { user_id: {"messages": [...], "last_message_time": time } }
-BUFFER_DELAY = 15        # وقت تجميع الرسائل
-MEMORY_TIMEOUT = 900     # 15 دقيقة ذاكرة = 900 ثانية
+# ==============================
+# 2) Sessions Memory
+# ==============================
+
+SESSIONS = {}
+BUFFER_DELAY = 15
+MEMORY_TIMEOUT = 900   # 15 minutes
 
 
-# ---------------------------------------------------------
-# 1) 15-second buffer for merging messages
-# ---------------------------------------------------------
+# ==============================
+# 3) Schedule (15 sec merge)
+# ==============================
 
 def schedule_reply(user_id):
-    """ينتظر 15 ثانية، إذا ما وصلت رسالة جديدة → يجاوب."""
     time.sleep(BUFFER_DELAY)
 
     state = SESSIONS.get(user_id)
@@ -34,37 +39,31 @@ def schedule_reply(user_id):
 
     now = time.time()
 
-    # إذا ماكو رسالة جديدة خلال 15 ثانية → نعالج الرسائل
+    # إذا ما وصلت رسالة جديدة خلال 15 ثانية → نرد
     if (now - state["last_message_time"]) >= BUFFER_DELAY:
-        combined_text = " ".join(state["messages"])
-
         try:
-            reply = ask_openai(user_id, combined_text)
+            reply = ask_openai(user_id)
         except Exception as e:
             print("❌ OpenAI Error:", e)
-            reply = "صار خلل بسيط، حاول مرة ثانية 🙏"
+            reply = "صار خلل بسيط، جرب مرة ثانية 🙏"
 
         send_message(user_id, reply)
 
-        # ما نمسح الذاكرة — نخليها إلى أن تمر 15 دقيقة بدون رسائل
-        # التنظيف راح يصير تلقائياً داخل add_user_message()
 
-
-# ---------------------------------------------------------
-# 2) Add message + long-term 15 min memory
-# ---------------------------------------------------------
+# ==============================
+# 4) Add Message + Memory 15 min
+# ==============================
 
 def add_user_message(user_id, text):
     now = time.time()
 
-    # إذا المستخدم جديد أو ذاكرته انتهت → سوّ جلسة جديدة
+    # إنشاء جلسة جديدة إذا قديمة أو غير موجودة
     if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT):
         SESSIONS[user_id] = {
             "messages": [],
             "last_message_time": now
         }
 
-    # إضافة الرسالة الجديدة إلى الذاكرة
     SESSIONS[user_id]["messages"].append(text)
     SESSIONS[user_id]["last_message_time"] = now
 
@@ -73,13 +72,21 @@ def add_user_message(user_id, text):
     t.start()
 
 
-# ---------------------------------------------------------
-# 3) OpenAI handler (with full memory context)
-# ---------------------------------------------------------
+# ==============================
+# 5) AI Response — آخر رسالة فقط
+# ==============================
 
-def ask_openai(user_id, new_text):
-    # جمع كل تاريخ المحادثة
-    full_context = " | ".join(SESSIONS[user_id]["messages"])
+def ask_openai(user_id):
+    msgs = SESSIONS[user_id]["messages"]
+
+    # آخر رسالة فقط
+    last_message = msgs[-1]
+
+    # التاريخ السابق كخلفية فقط
+    if len(msgs) > 1:
+        history = " | ".join(msgs[:-1])
+    else:
+        history = ""
 
     system_prompt = """
 فهمت قصدك، الملاحظة جداً دقيقة. البوت لازم يكون "بياع" شاطر مو مجرد مجيب آلي، ولازم يحسس الزبون إنه محصل فرصة.
@@ -130,31 +137,38 @@ def ask_openai(user_id, new_text):
 
 المراجع: "بيش التغليف؟" علي: "نستخدم زاركون ألماني بضمان مدى الحياة، وسعره بالعرض حالياً 75 ألف فقط للسن. شغل يبيض الوجه. دزلي اسمك ورقمك للحجز؟"
 ▪️ أسلوب الرد:
-- مختصر جدًا
-- لبق
-- يخفف القلق
-- يشرح ببساطة
+- مختصر جداً
+- بلا تكرار
+- بلا مبالغة
+- يجاوب آخر رسالة فقط
 """
 
     rsp = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": full_context}
+            {
+                "role": "assistant",
+                "content": f"سياق المحادثة السابقة (خلفية فقط): {history}"
+            },
+            {
+                "role": "user",
+                "content": last_message
+            }
         ],
-        max_tokens=250
+        max_tokens=200
     )
 
     return rsp.choices[0].message.content.strip()
 
 
-# ---------------------------------------------------------
-# 4) Webhook routes
-# ---------------------------------------------------------
+# ==============================
+# 6) Webhook Endpoints
+# ==============================
 
 @app.route("/", methods=["GET"])
 def home():
-    return "GoldenLine bot running — Memory 15 minutes + Buffer 15 seconds"
+    return "GoldenLine bot — Reply only to last message — Memory OK"
 
 
 @app.route("/webhook", methods=["GET"])
@@ -185,9 +199,9 @@ def webhook():
     return "OK", 200
 
 
-# ---------------------------------------------------------
-# 5) Send reply to Facebook
-# ---------------------------------------------------------
+# ==============================
+# 7) Facebook Reply
+# ==============================
 
 def send_message(receiver, text):
     url = "https://graph.facebook.com/v18.0/me/messages"
@@ -201,6 +215,9 @@ def send_message(receiver, text):
     print("📤 Facebook:", r.text)
 
 
-# Render server
+# ==============================
+# Render Server
+# ==============================
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
