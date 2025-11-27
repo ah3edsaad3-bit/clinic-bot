@@ -7,21 +7,30 @@ import threading
 
 app = Flask(__name__)
 
-# Tokens from Environment Variables
+# ==============================
+# 1) Tokens
+# ==============================
+
 VERIFY_TOKEN = "goldenline_secret"
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Sessions memory
-SESSIONS = {}
-BUFFER_DELAY = 15  # 15 seconds لتجميع الرسائل في محادثة واحدة
-MAX_HISTORY_TURNS = 10 # عدد الأدوار (user/assistant) التي يتم الاحتفاظ بها في الذاكرة
+# ==============================
+# 2) Sessions Memory
+# ==============================
 
+SESSIONS = {}
+BUFFER_DELAY = 15
+MEMORY_TIMEOUT = 900   # 15 minutes
+
+
+# ==============================
+# 3) Schedule (15 sec merge)
+# ==============================
 
 def schedule_reply(user_id):
-    """Wait 15 seconds — if no new messages, process."""
     time.sleep(BUFFER_DELAY)
 
     state = SESSIONS.get(user_id)
@@ -30,88 +39,133 @@ def schedule_reply(user_id):
 
     now = time.time()
 
-    # If no new messages in last 15 sec → process
+    # إذا ما وصلت رسالة جديدة خلال 15 ثانية → نرد
     if (now - state["last_message_time"]) >= BUFFER_DELAY:
-        
-        # 1. Prepare user message and add to history
-        messages_buffer = state["messages"] 
-        
-        if not messages_buffer:
-            return
-
-        final_user_text = " ".join(messages_buffer)
-
-        # إضافة رسالة المستخدم المجمعة إلى الـ history قبل الإرسال
-        state["history"].append({"role": "user", "content": final_user_text})
-
-        # 2. Call OpenAI with the full history
-        reply = ""
         try:
-            # تمرير سجل المحادثة بالكامل (history) للحفاظ على السياق
-            reply = ask_openai(state["history"]) 
-            
-            # 3. Append assistant's reply to history
-            state["history"].append({"role": "assistant", "content": reply})
-            
+            reply = ask_openai(user_id)
         except Exception as e:
             print("❌ OpenAI Error:", e)
-            reply = "صار خلل بسيط، حاول مرة ثانية 🙏"
-            
-            # إذا حدث خطأ، نحذف آخر رسالة مستخدم أضفناها لتجنب استهلاك سياق خاطئ
-            state["history"].pop()
+            reply = "صار خلل بسيط، جرب مرة ثانية 🙏"
 
         send_message(user_id, reply)
 
-        # 4. Truncate history to prevent large context window (and high cost)
-        if len(state["history"]) > MAX_HISTORY_TURNS:
-            # نحتفظ بآخر MAX_HISTORY_TURNS فقط
-            state["history"] = state["history"][-MAX_HISTORY_TURNS:]
-        
-        # 5. Reset the temporary buffer only, KEEPING the conversation history
-        SESSIONS[user_id]["messages"] = []
-        SESSIONS[user_id]["last_message_time"] = 0
 
+# ==============================
+# 4) Add Message + Memory 15 min
+# ==============================
 
 def add_user_message(user_id, text):
     now = time.time()
 
-    if user_id not in SESSIONS:
-        # Initializing the session with 'history' list for context memory
+    # إنشاء جلسة جديدة إذا قديمة أو غير موجودة
+    if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT):
         SESSIONS[user_id] = {
-            "messages": [], 
-            "history": [], # سجل المحادثة
+            "messages": [],
             "last_message_time": now
         }
 
     SESSIONS[user_id]["messages"].append(text)
     SESSIONS[user_id]["last_message_time"] = now
 
-    # Start timer thread
+    # تشغيل مؤقت الدمج
     t = threading.Thread(target=schedule_reply, args=(user_id,))
     t.start()
 
 
-def ask_openai(conversation_history):
-    system_prompt = (
-        "انت مساعد ذكي ترد باللهجة العراقية وباختصار، "
-        "وإذا الزبون يريد يحجز اطلب الاسم والرقم."
-    )
-    
-    # دمج الـ system prompt مع سجل المحادثة
-    messages_with_system = [{"role": "system", "content": system_prompt}] + conversation_history
+# ==============================
+# 5) AI — آخر رسالة فقط + سياق خلفي
+# ==============================
+
+def ask_openai(user_id):
+    msgs = SESSIONS[user_id]["messages"]
+
+    # آخر رسالة فقط
+    last_message = msgs[-1]
+
+    # التاريخ السابق كخلفية فقط
+    if len(msgs) > 1:
+        history = " | ".join(msgs[:-1])
+    else:
+        history = ""
+
+    system_prompt = """
+أنت "علي"، المساعد الذكي لعيادة "كولدن لاين". أسلوبك: عراقي بغدادي، ذكي اجتماعياً، مختصر، ومقنع. هدفك تحويل السؤال إلى حجز.
+
+قواعد الرد الذكية (مهم جداً):
+ممنوع الرفض المباشر: إذا سأل عن تخفيض أو قال "غالي"، إياك أن تقول "لا ماكو" أو "السعر ثابت".
+
+سياسة الإقناع: جاوب دائماً بأن "الأسعار الحالية هي أسعار عروض وتنافسية جداً" واربط السعر بـ (المواد الألمانية + الضمان الحقيقي). حسسه إنه ماخذ صفقة ممتازة.
+
+عدم تكرار الترحيب: الترحيب مرة واحدة فقط، بعدها ادخل بالجواب فوراً.
+
+الاختصار: جوابك سطرين أو ثلاثة، وانهي كلامك دائماً بسؤال يمهد للحجز (مثلاً: "تحب نحجزلك؟").
+
+سيناريو الحجز:
+عند طلب الحجز: "تمام حبيبي، حتى أكملك الحجز دزلي اسمك ورقمك."
+
+بعد استلام الرقم والاسم (رد واحد فقط): "تأكيد الحجز: الاسم: ... الرقم: ... الخدمة: ... راح نتواصل وياك خلال لحظات."
+
+معلومات العيادة:
+العنوان: بغداد – زيونة – شارع الربيعي الخدمي – داخل كراج مجمع إسطنبول.
+
+الدوام: يومياً 4 عصراً - 9 مساءً (الجمعة عطلة).
+
+الأسعار والخدمات (رد بذكاء):
+التغليف (زاركون ألماني - ضمان مدى الحياة):
+
+فل زاركون: 75,000 د.ع (عرض خاص).
+
+زاركون مدمج أيماكس: 100,000 د.ع.
+
+زاركون 3D: 125,000 د.ع.
+
+الحشوات: تجميلية (35,000)، جذر (125,000).
+
+القلع: عادي (25,000)، جراحي (75,000).
+
+أمثلة لتعليمك "ذكاء الرد":
+المراجع: "أكو مجال بالسعر؟ / شو غالي" علي: "يا طيب هاي الأسعار هي أسعار عروض حالياً، وتنافسية جداً لأن موادنا ألمانية وعليها ضمان مدى الحياة. صدكني السعر كلش مناسب مقابل الجودة. أثبتلك حجز؟"
+
+المراجع: "أكو تخفيضات؟" علي: "حالياً أحنا مسوين عروض خاصة والأسعار مخفضة مقارنة بالسوق مع الحفاظ على المواد الأصلية والضمان. تحب تستغل العرض ونحجزلك موعد؟"
+
+المراجع: "بيش التغليف؟" علي: "نستخدم زاركون ألماني بضمان مدى الحياة، وسعره بالعرض حالياً 75 ألف فقط للسن. شغل يبيض الوجه. دزلي اسمك ورقمك للحجز؟"
+▪️ ترد على **آخر رسالة فقط**.
+▪️ تستخدم الرسائل السابقة فقط لفهم السياق، بدون ما تعيد الشرح.
+▪️ ردودك قصيرة، لبقة، باللهجة العراقية الواضحة.
+
+▪️ إذا الزبون يريد يحجز، تطلب منه الاسم والرقم:
+   "تمام حبيبي، حتى أكملك الحجز دزلي اسمك ورقمك."
+
+▪️ لا تكرر نفس المعلومات بنفس المحادثة.
+▪️ لا ترجع تعيد الأسعار إلا إذا طلبها صراحة.
+
 
     rsp = client.chat.completions.create(
-        model="gpt-4o-mini", # استخدام نموذج جديد لدعم أفضل
-        messages=messages_with_system,
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {
+                "role": "assistant",
+                "content": f"خلفية المحادثة السابقة: {history}"
+            },
+            {
+                "role": "user",
+                "content": last_message
+            }
+        ],
         max_tokens=200
     )
 
     return rsp.choices[0].message.content.strip()
 
 
+# ==============================
+# 6) Webhook Endpoints
+# ==============================
+
 @app.route("/", methods=["GET"])
 def home():
-    return "Render bot running with 15s buffer ⏳"
+    return "GoldenLine bot — Reply only to last message — Memory OK"
 
 
 @app.route("/webhook", methods=["GET"])
@@ -137,11 +191,14 @@ def webhook():
 
             if "message" in ev and "text" in ev["message"]:
                 text = ev["message"]["text"]
-
                 add_user_message(sender, text)
 
     return "OK", 200
 
+
+# ==============================
+# 7) Facebook Reply
+# ==============================
 
 def send_message(receiver, text):
     url = "https://graph.facebook.com/v18.0/me/messages"
@@ -150,10 +207,13 @@ def send_message(receiver, text):
         "recipient": {"id": receiver},
         "message": {"text": text}
     }
+
     requests.post(url, params=params, json=payload)
 
 
-# Render server
+# ==============================
+# Render Server
+# ==============================
+
 if __name__ == "__main__":
-    # تأكد من أن المنفذ 10000 هو المنفذ الذي تستخدمه في Render أو منصة الاستضافة
     app.run(host="0.0.0.0", port=10000)
