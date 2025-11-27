@@ -3,51 +3,77 @@ import requests
 from openai import OpenAI
 import time
 import os
+import threading
 
 app = Flask(__name__)
 
-# 🔑 Tokens from Environment Variables
+# Tokens from Environment Variables
 VERIFY_TOKEN = "goldenline_secret"
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# 🧠 Simple memory system
+# Sessions memory
 SESSIONS = {}
-SESSION_TIMEOUT = 600  # 10 minutes
+BUFFER_DELAY = 15  # 15 seconds
 
 
-def add_message_to_session(user_id, text):
-    now = time.time()
+def schedule_reply(user_id):
+    """Wait 15 seconds — if no new messages, process."""
+    time.sleep(BUFFER_DELAY)
+
     state = SESSIONS.get(user_id)
+    if state is None:
+        return
 
-    if state is None or (now - state["last_time"] > SESSION_TIMEOUT):
-        state = {"messages": [], "last_time": now}
-        SESSIONS[user_id] = state
+    now = time.time()
 
-    state["messages"].append(text)
-    state["last_time"] = now
+    # If no new messages in last 15 sec → process
+    if (now - state["last_message_time"]) >= BUFFER_DELAY:
+        messages = state["messages"]
+        final_text = " ".join(messages)
 
-    if len(state["messages"]) > 10:
-        state["messages"] = state["messages"][-10:]
+        try:
+            reply = ask_openai(final_text)
+        except Exception as e:
+            print("❌ OpenAI Error:", e)
+            reply = "صار خلل بسيط، حاول مرة ثانية 🙏"
 
-    return state["messages"]
+        send_message(user_id, reply)
+
+        # Reset messages
+        SESSIONS[user_id] = {
+            "messages": [],
+            "last_message_time": 0
+        }
 
 
-def ask_openai(messages_list):
-    combined = " | ".join(messages_list)
+def add_user_message(user_id, text):
+    now = time.time()
 
+    if user_id not in SESSIONS:
+        SESSIONS[user_id] = {"messages": [], "last_message_time": now}
+
+    SESSIONS[user_id]["messages"].append(text)
+    SESSIONS[user_id]["last_message_time"] = now
+
+    # Start timer thread
+    t = threading.Thread(target=schedule_reply, args=(user_id,))
+    t.start()
+
+
+def ask_openai(user_input):
     system_prompt = (
-        "انت مساعد ذكي ترد باللهجة العراقية وبشكل قصير ومقنع، "
-        "واذا الزبون يريد يحجز اطلب الاسم والرقم."
+        "انت مساعد ذكي ترد باللهجة العراقية وباختصار، "
+        "وإذا الزبون يريد يحجز اطلب الاسم والرقم."
     )
 
     rsp = client.chat.completions.create(
         model="gpt-4.1-mini",
         messages=[
             {"role": "system", "content": system_prompt},
-            {"role": "user", "content": combined}
+            {"role": "user", "content": user_input}
         ],
         max_tokens=200
     )
@@ -57,7 +83,7 @@ def ask_openai(messages_list):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "Render Bot is running! ✅"
+    return "Render bot running with 15s buffer ⏳"
 
 
 @app.route("/webhook", methods=["GET"])
@@ -69,12 +95,13 @@ def verify():
     if mode == "subscribe" and token == VERIFY_TOKEN:
         return challenge, 200
 
-    return "Verification failed", 403
+    return "Error", 403
 
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
+    print("📩 Incoming:", data)
 
     for entry in data.get("entry", []):
         for ev in entry.get("messaging", []):
@@ -83,17 +110,9 @@ def webhook():
             if "message" in ev and "text" in ev["message"]:
                 text = ev["message"]["text"]
 
-                msg_list = add_message_to_session(sender, text)
+                add_user_message(sender, text)
 
-                try:
-                    reply = ask_openai(msg_list)
-                except Exception as e:
-                    print("❌ OpenAI Error:", e)
-                    reply = "صار خطأ بسيط… حاول مرة ثانية 🙏"
-
-                send_message(sender, reply)
-
-    return "EVENT_RECEIVED", 200
+    return "OK", 200
 
 
 def send_message(receiver, text):
@@ -103,10 +122,9 @@ def send_message(receiver, text):
         "recipient": {"id": receiver},
         "message": {"text": text}
     }
-    r = requests.post(url, params=params, json=payload)
-    print("Facebook response:", r.text)
+    requests.post(url, params=params, json=payload)
 
 
-# Run app for Render
+# Render server
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
