@@ -4,11 +4,12 @@ from openai import OpenAI
 import time
 import os
 import threading
+import re
 
 app = Flask(__name__)
 
 # ==============================
-# 1) Tokens
+# Tokens
 # ==============================
 
 VERIFY_TOKEN = "goldenline_secret"
@@ -18,28 +19,28 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # ==============================
-# 2) Sessions Memory
+# Session Memory
 # ==============================
 
-SESSIONS = {}  
+SESSIONS = {}
 BUFFER_DELAY = 15
-MEMORY_TIMEOUT = 900  # 15 min
+MEMORY_TIMEOUT = 900  # 15 minutes
 
 
 # ==============================
-# 3) WhatsApp Sender
+# SEND TO WHATSAPP (CallMeBot)
 # ==============================
 
 def send_to_whatsapp(name, phone, service, history_text):
     try:
         message = f"""
-🔥 حجز جديد من البوت:
+🔥 حجز جديد:
 
 الاسم: {name}
 الرقم: {phone}
 الخدمة: {service}
 
-الرسائل السابقة:
+محادثة الزبون:
 {history_text}
         """
 
@@ -49,18 +50,18 @@ def send_to_whatsapp(name, phone, service, history_text):
 
         r = requests.get(url)
         print("📤 WhatsApp sent:", r.text)
-
     except Exception as e:
         print("❌ WhatsApp Error:", e)
 
 
 # ==============================
-# 4) Detect booking keywords
+# Utility Functions
 # ==============================
 
 def detect_booking_intent(text):
-    words = ["احجز", "اريد احجز", "موعد", "احتاج حجز", "اريد اجي", "booking"]
+    words = ["احجز", "اريد احجز", "موعد", "احتاج", "booking", "اجي"]
     return any(w in text.lower() for w in words)
+
 
 def detect_service(text):
     t = text.lower()
@@ -74,21 +75,32 @@ def detect_service(text):
         return "حشوة تجميلية"
     if "جذر" in t:
         return "حشوة جذر"
-    if "تبيض" in t or "تبييض" in t:
+    if "تبييض" in t or "تبيض" in t:
         return "تبييض الأسنان"
     if "تنظيف" in t or "تنضيف" in t:
         return "تنظيف الأسنان"
-    if "تقويم" in t:
-        return "تقويم الأسنان"
     if "قلع" in t:
         return "قلع"
-    if "زراعة" in t:
-        return "زراعة أسنان"
     return "غير محددة"
 
 
+def extract_phone(text):
+    digits = re.sub(r"\D", "", text)
+    if digits.startswith("07") and len(digits) == 11:
+        return digits
+    return None
+
+
+def extract_name(text):
+    if any(c.isdigit() for c in text):
+        return None
+    if len(text) < 3:
+        return None
+    return text.strip()
+
+
 # ==============================
-# 5) 15-sec reply buffer
+# 15-Second Processing
 # ==============================
 
 def schedule_reply(user_id):
@@ -100,25 +112,89 @@ def schedule_reply(user_id):
 
     now = time.time()
 
-    if (now - state["last_message_time"]) >= BUFFER_DELAY:
-        try:
-            reply = ask_openai(user_id)
-        except Exception as e:
-            print("❌ AI Error:", e)
-            reply = "صار خلل بسيط، جرب مرة ثانية 🙏"
+    if (now - state["last_message_time"]) < BUFFER_DELAY:
+        return
 
-        send_message(user_id, reply)
+    messages = state["messages"]
+    history_text = " | ".join(messages[:-1]) if len(messages) > 1 else ""
+    last_msg = messages[-1]
+
+    # ------------------------------------------
+    # 1) BOOKING PHASE FIX – NEW INTELLIGENT LOGIC
+    # ------------------------------------------
+
+    # إذا الزبون يريد يحجز
+    if state["booking_step"] is None and detect_booking_intent(last_msg):
+        state["booking_service"] = detect_service(history_text + " " + last_msg)
+        state["booking_step"] = "ask_name"
+        send_message(user_id, "تمام حبيبي، حتى أكملك الحجز دزلي اسمك الكامل.")
+        state["messages"] = []
+        return
+
+    # إذا ننتظر اسم
+    if state["booking_step"] == "ask_name":
+        name = extract_name(last_msg)
+        if name:
+            state["booking_name"] = name
+            state["booking_step"] = "ask_phone"
+            send_message(user_id, "تمام حبيبي، هسه دزلي رقمك حتى أكمل الحجز.")
+            state["messages"] = []
+            return
+        else:
+            send_message(user_id, "دزلي اسمك بدون أرقام حبيبي.")
+            state["messages"] = []
+            return
+
+    # إذا ننتظر رقم
+    if state["booking_step"] == "ask_phone":
+        phone = extract_phone(last_msg)
+        if phone:
+            state["booking_phone"] = phone
+            state["booking_step"] = "done"
+
+            # إرسال للواتساب
+            send_to_whatsapp(
+                state["booking_name"],
+                state["booking_phone"],
+                state["booking_service"],
+                history_text
+            )
+
+            confirmation = f"""
+تم تأكيد الحجز ❤️
+
+الاسم: {state['booking_name']}
+الرقم: {state['booking_phone']}
+الخدمة: {state['booking_service']}
+
+راح يتواصل وياك قسم المتابعة خلال لحظات 🙏
+            """
+            send_message(user_id, confirmation)
+            state["messages"] = []
+            return
+        else:
+            send_message(user_id, "حبيبي الرقم لازم يبدأ بـ 07 ويكون 11 رقم.")
+            state["messages"] = []
+            return
+
+    # ------------------------------------------
+    # 2) NORMAL AI REPLY
+    # ------------------------------------------
+
+    reply = ask_ai(history_text, last_msg)
+    send_message(user_id, reply)
+
+    state["messages"] = []
 
 
 # ==============================
-# 6) Add message + memory logic
+# Add User Message
 # ==============================
 
 def add_user_message(user_id, text):
     now = time.time()
 
     if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"]) > MEMORY_TIMEOUT:
-
         SESSIONS[user_id] = {
             "messages": [],
             "last_message_time": now,
@@ -135,130 +211,68 @@ def add_user_message(user_id, text):
 
 
 # ==============================
-# 7) AI Response + Booking System
+# AI Response
 # ==============================
 
-def ask_openai(user_id):
-    state = SESSIONS[user_id]
-    msgs = state["messages"]
-    last_msg = msgs[-1]
-    history = " | ".join(msgs[:-1]) if len(msgs) > 1 else ""
-
-    # ==================================================
-    #          BOOKING LOGIC
-    # ==================================================
-
-    # 1) نية الحجز
-    if state["booking_step"] is None and detect_booking_intent(last_msg):
-        state["booking_step"] = "asking_name"
-        state["booking_service"] = detect_service(history + " " + last_msg)
-        return "تمام حبيبي، حتى أكملك الحجز دزلي اسمك الكامل."
-
-    # 2) استلام الاسم
-    if state["booking_step"] == "asking_name":
-        state["booking_name"] = last_msg.strip()
-        state["booking_step"] = "asking_phone"
-        return "تمام حبيبي، هسه دزلي رقمك حتى أكمل الحجز."
-
-    # 3) استلام الرقم + تحقق
-    if state["booking_step"] == "asking_phone":
-        phone = last_msg.replace(" ", "")
-        if not (phone.startswith("07") and len(phone) == 11):
-            return "حبيبي الرقم غير صحيح. لازم يبدأ بـ 07 ويكون 11 رقم."
-
-        state["booking_phone"] = phone
-        state["booking_step"] = "done"
-
-        # إرسال واتساب
-        send_to_whatsapp(
-            state["booking_name"],
-            state["booking_phone"],
-            state["booking_service"],
-            history
-        )
-
-        return f"""
-تأكيد الحجز:
-الاسم: {state['booking_name']}
-الرقم: {state['booking_phone']}
-الخدمة: {state['booking_service']}
-راح يتم التواصل وياك من قسم المتابعة خلال لحظات ❤️
-        """
-
-    # ==================================================
-    #               NORMAL AI REPLY
-    # ==================================================
-
-    system_prompt = """
-انت اسمك "علي" موظّف الكول سنتر في عيادة كولدن لاين لطب وتجميل الأسنان.
-تحجي باللهجة العراقية، باحترام، وبدون مبالغة. ردودك قصيرة (سطرين أو 3)، 
-وتجاوب فقط على **آخر رسالة**. الرسائل القديمة تستخدمها فقط كخلفية للفهم.
-
-✔️ إذا عنده مشكلة ويه العيادة: 
-   تكوله: "حبيبي هذا رقم العيادة حتى يتواصلون وياك مباشرة: 07728802820"
-
-✔️ إذا يريد يحجز:
-   تطلب منه الاسم ثم الرقم.
-
-✔️ تفهم الكلمات العامية:
-(قبق/غلاف/تقبيق = تغليف)
-(طاح/وكع/انشلع = انقلع)
-(تحشاه/تحشية = حشوة)
-(يوجعني/يموتني = ألم)
+def ask_ai(history, last_msg):
+    system = """
+انت اسمك "علي" موظّف الكول سنتر في عيادة كولدن لاين.
+تحجي باللهجة العراقية، محترم، وبدون مبالغة.
+تجاوب فقط على آخر رسالة، وتستخدم الرسائل القديمة للفهم فقط.
 
 معلومات العيادة:
-- بغداد، زيونة، شارع الربيعي – داخل كراج مجمع إسطنبول
-- الدوام: 4 مساءً – 9 مساءً (الجمعة عطلة)
+- بغداد / زيونة / الربيعي – داخل كراج مجمع إسطنبول
+- الدوام: 4 المساء – 9 المساء / الجمعة عطلة
 - رقم الحجز: 07728802820
 
 الأسعار:
-- زاركون 75
-- زاركون أيماكس 100
-- القلع 25
-- الحشوة 35
-- حشوة الجذر 125
-- تبييض 100
-- تنظيف 25
-- تقويم 450
-- زراعة كوري 350
-- زراعة ألماني 450
-- زراعة فورية كاملة 1,750
-- ابتسامة زاركون 1,200,000 (16 سن)
-- ابتسامة إيماكس 1,600,000 (16 سن)
+الزاركون 75 – الايماكس 100 – القلع 25 – الحشوة 35 – الجذر 125
+تبييض 100 – تنظيف 25 – تقويم 450
+زراعة (كوري 350 / ألماني 450)
+الزرعات الفورية الكاملة 1,750,000
+ابتسامة زاركون 1,200,000
+ابتسامة ايماكس 1,600,000
 
-لا تكرر، لا تبالغ، طمّن المراجع، وخليك صديق إله.
-"""
+خلك طيب، مختصر، تطمن المراجع.
+    """
 
     rsp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "assistant", "content": f"خلفية المحادثة السابقة: {history}"},
+            {"role": "system", "content": system},
+            {"role": "assistant", "content": f"خلفية المحادثة: {history}"},
             {"role": "user", "content": last_msg}
         ],
-        max_tokens=250
+        max_tokens=200
     )
 
     return rsp.choices[0].message.content.strip()
 
 
 # ==============================
-# 8) Webhook Endpoints
+# Facebook Send
 # ==============================
 
-@app.route("/", methods=["GET"])
+def send_message(receiver, text):
+    url = "https://graph.facebook.com/v18.0/me/messages"
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    payload = {"recipient": {"id": receiver}, "message": {"text": text}}
+    requests.post(url, params=params, json=payload)
+
+
+# ==============================
+# Webhook
+# ==============================
+
+@app.route("/")
 def home():
-    return "GoldenLine bot with Smart Booking — Running"
+    return "GoldenLine Smart Bot Running"
 
 
 @app.route("/webhook", methods=["GET"])
 def verify():
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return challenge, 200
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
     return "Error", 403
 
 
@@ -268,29 +282,15 @@ def webhook():
     print("📩 Incoming:", data)
 
     for entry in data.get("entry", []):
-        for ev in entry.get("messaging", []):
-            sender = ev["sender"]["id"]
-
-            if "message" in ev and "text" in ev["message"]:
-                add_user_message(sender, ev["message"]["text"])
+        for event in entry.get("messaging", []):
+            if "message" in event and "text" in event["message"]:
+                add_user_message(event["sender"]["id"], event["message"]["text"])
 
     return "OK", 200
 
 
 # ==============================
-# 9) Facebook Send
-# ==============================
-
-def send_message(receiver, text):
-    url = "https://graph.facebook.com/v18.0/me/messages"
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    payload = {"recipient": {"id": receiver}, "message": {"text": text}}
-
-    requests.post(url, params=params, json=payload)
-
-
-# ==============================
-# RUN (Render)
+# RUN SERVER
 # ==============================
 
 if __name__ == "__main__":
