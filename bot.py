@@ -60,15 +60,15 @@ def session_cleaner():
         time.sleep(CLEANER_INTERVAL)
         now = time.time()
         with SESSIONS_LOCK:
-            drop = []
+            remove = []
             for uid, sess in SESSIONS.items():
                 if (now - sess["last_active"]) > SESSION_MAX_AGE:
-                    drop.append(uid)
-            for uid in drop:
+                    remove.append(uid)
+            for uid in remove:
                 del SESSIONS[uid]
 
 
-# ============= 4) BUFFER SYSTEM =============
+# ============= 4) BUFFER =============
 def schedule_reply(uid):
     time.sleep(BUFFER_DELAY)
 
@@ -78,37 +78,34 @@ def schedule_reply(uid):
         return
 
     now = time.time()
-
     with session["lock"]:
         if (now - session["last_time"]) < BUFFER_DELAY:
             return
         if not session["messages_buffer"]:
             return
-
         final_text = " ".join(session["messages_buffer"]).strip()
         session["messages_buffer"] = []
 
-    reply = process_user_message(uid, final_text)
-    if reply:
-        send_message(uid, reply)
+    if final_text:
+        reply = process_user_message(uid, final_text)
+        if reply:
+            send_message(uid, reply)
 
 
 def add_message(uid, text):
     session = get_session(uid)
-    now = time.time()
     with session["lock"]:
         session["messages_buffer"].append(text)
-        session["last_time"] = now
+        session["last_time"] = time.time()
 
     t = threading.Thread(target=schedule_reply, args=(uid,))
     t.daemon = True
     t.start()
 
 
-# ============= 5) REMINDER 30 MINUTES =============
+# ============= 5) 30-MIN REMINDER =============
 def schedule_reminder(uid):
     time.sleep(1800)
-
     session = SESSIONS.get(uid)
     if session and session["state"] in ["waiting_name", "waiting_phone"]:
         send_message(uid, "بس أذكرك حبي، إذا تريد نكمل الحجز دز اسمك ورقمك ♥️")
@@ -118,22 +115,30 @@ def schedule_reminder(uid):
 def detect_intent(txt):
     t = txt.lower().replace("أ", "ا")
 
-    # ---- كلمات تعني سعر = بيش / ببيش / يبيش / ييييش
+    # ---- complaint detection (أعلى أولوية)
+    complaint_words = [
+        "افشل", "فاشل", "مو مضبوط", "مكسور", "تنكسر", "مكسوره",
+        "حرام", "نصاب", "غلط", "الاطباق غلط", "خسرت", "مليون",
+        "افلوس", "انضحك", "قهر", "ضايج", "مو نفس"
+    ]
+    if any(w in t for w in complaint_words):
+        return "complaint"
+
+    # ---- price intent (بيش / يبيش / ببيش)
     if re.search(r"ب?ي+ش", t):
         return "price"
 
-    price_words = [
-        "عرض", "عروض", "سعر", "اسعار", "شكد", "كم", "بيش", "ببيش"
-    ]
-    if any(w in t for w in price_words):
+    if any(w in t for w in ["عرض", "سعر", "اسعار", "شكد", "كم"]):
         return "price"
 
-    if any(w in t for w in ["احجز", "موعد", "اريد احجز", "حجز"]):
+    # ---- booking
+    if any(w in t for w in ["احجز", "حجز", "موعد"]):
         return "booking"
 
+    # ---- medical
     if any(w in t for w in [
         "يوجع", "وجع", "ألم", "ورم", "انتفاخ", "التهاب",
-        "ينزف", "نزف", "يحكني", "خراج", "ضرس", "سنه", "سن"
+        "ينزف", "نزف", "ضرس", "سنه", "سن", "خراج"
     ]):
         return "medical"
 
@@ -144,7 +149,7 @@ def detect_intent(txt):
 def detect_service(txt):
     t = txt.lower()
 
-    if any(w in t for w in ["زركون", "زر", "غلاف", "تلبيس", "تغليف"]):
+    if any(w in t for w in ["زركون", "غلاف", "زر", "تلبيس", "تغليف"]):
         if "ايماكس" in t:
             return "تغليف زركون إيماكس"
         return "تغليف زركون"
@@ -152,22 +157,22 @@ def detect_service(txt):
     if "ايماكس" in t:
         return "تغليف إيماكس"
 
-    if "قلع" in t or "شلع" in t:
-        return "قلع سن"
-
     if "حشوة" in t:
         if "جذر" in t or "عصب" in t:
             return "حشوة جذر"
         return "حشوة تجميلية"
 
-    if "تبييض" in t or "تبيض" in t:
-        return "تبييض الأسنان"
+    if "قلع" in t or "شلع" in t:
+        return "قلع سن"
 
     if "تنظيف" in t:
         return "تنظيف الأسنان"
 
     if "تقويم" in t:
         return "تقويم الأسنان"
+
+    if "تبييض" in t or "تبيض" in t:
+        return "تبييض الأسنان"
 
     if "زراعة" in t:
         return "زراعة أسنان"
@@ -189,11 +194,8 @@ def extract_teeth_count(txt):
         return int(m.group(1))
 
     words = {
-        "واحد": 1, "وحد": 1,
-        "اثنين": 2, "ثنين": 2,
-        "ثلاثة": 3, "ثلاث": 3,
-        "اربعة": 4, "أربعة": 4,
-        "خمسة": 5, "ستة": 6, "سبعة": 7,
+        "واحد": 1, "اثنين": 2, "ثلاثة": 3, "ثلاث": 3,
+        "اربعة": 4, "خمسة": 5, "ستة": 6, "سبعة": 7,
         "ثمانية": 8, "تسعة": 9, "عشرة": 10
     }
     for w, n in words.items():
@@ -206,16 +208,16 @@ def extract_teeth_count(txt):
 # ============= 9) CORE LOGIC =============
 def process_user_message(uid, text):
     session = get_session(uid)
-    t = text.strip().lower()
+    t = text.lower()
 
-    # ----- إلغاء الحجز عند كلمات معينة -----
+    # إلغاء الحجز إذا كتب (عندي مشكلة / لحظة / قبلها)
     if session["state"] in ["waiting_name", "waiting_phone"]:
-        if any(w in t for w in ["مشكلة", "سؤال", "لحظة", "انتظر", "قبلها", "خل", "عندي"]):
+        if any(w in t for w in ["مشكلة", "لحظة", "انتظر", "قبلها", "عندي", "سؤال"]):
             session["state"] = "idle"
             return "تفضل حبي، كللي شنو المشكلة؟ ❤️"
 
-    # ----- عدد الأسنان -----
-    cnt = extract_teeth_count(t)
+    # عدد الأسنان
+    cnt = extract_teeth_count(text)
     if cnt:
         session["teeth_count"] = cnt
 
@@ -223,68 +225,81 @@ def process_user_message(uid, text):
 
     # ====== waiting_name ======
     if st == "waiting_name":
-        if normalize_phone(t):
+        phone = normalize_phone(text)
+        name_candidate = re.sub(r"\d+", "", text).strip()
+
+        # اسم + رقم سوا
+        if phone and len(name_candidate.split()) >= 1:
+            session["temp_name"] = name_candidate
+            session["temp_phone"] = phone
+            service = session["temp_service"] or "فحص واستشارة"
+            send_to_whatsapp(name_candidate, phone, service)
+            session.update({"temp_name": "", "temp_phone": "", "temp_service": "", "state": "idle"})
+            return f"تم تأكيد الحجز ❤️\n\nالاسم: {name_candidate}\nالرقم: {phone}\nالخدمة: {service}"
+
+        if phone:
             return "حبي هذا شكل رقم، دزلي اسمك الثلاثي ❤️"
 
-        session["temp_name"] = text.strip()
+        session["temp_name"] = text
         session["state"] = "waiting_phone"
         threading.Thread(target=schedule_reminder, args=(uid,), daemon=True).start()
         return "تمام حبي، هسه دز رقمك يبدي بـ07 حتى أكملك الحجز ❤️"
 
     # ====== waiting_phone ======
     if st == "waiting_phone":
-        phone = normalize_phone(t)
+        phone = normalize_phone(text)
         if not phone:
             return "حبي الرقم يبدي بـ07 وطوله 11 رقم — مثال: 07812345678 🙏"
 
         session["temp_phone"] = phone
         service = session["temp_service"] or "فحص واستشارة"
 
-        msg = f"تم تأكيد الحجز ❤️\n\nالاسم: {session['temp_name']}\nالرقم: {phone}\nالخدمة: {service}\n\nراح يتواصل ويّاك قسم المتابعة بعد شوي 🙏"
-
         send_to_whatsapp(session["temp_name"], phone, service)
 
-        session.update({
-            "temp_name": "",
-            "temp_phone": "",
-            "temp_service": "",
-            "state": "idle",
-            "last_intent": "booking"
-        })
+        msg = (
+            "تم تأكيد الحجز ❤️\n\n"
+            f"الاسم: {session['temp_name']}\n"
+            f"الرقم: {phone}\n"
+            f"الخدمة: {service}"
+        )
+
+        session.update({"temp_name": "", "temp_phone": "", "temp_service": "", "state": "idle"})
         return msg
 
     # ----- detect intent -----
-    intent = detect_intent(t)
+    intent = detect_intent(text)
+
+    # ====== complaint ======
+    if intent == "complaint":
+        return (
+            "حبي آسف إذا مرّيت بهيج تجربة وحقّك علينا 🌿\n"
+            "خليني أفهم منك شنو اللي صار وبأي سن صارت المشكلة؟\n"
+            "وإذا تحب أحجزلك مراجعة مجانية ويشوفك الدكتور مباشرة ❤️"
+        )
 
     # ====== price ======
     if intent == "price":
-        service = detect_service(t)
-        if service != "غير محددة":
-            session["last_service"] = service
+        session["last_service"] = detect_service(text)
         return get_price_answer(session)
 
     # ====== booking ======
     if intent == "booking":
-        session["state"] = "waiting_name"
-        service = detect_service(t)
+        service = detect_service(text)
         session["temp_service"] = service
-        session["last_service"] = service
+        session["state"] = "waiting_name"
         threading.Thread(target=schedule_reminder, args=(uid,), daemon=True).start()
         return "حاضر حبي، دزلي اسمك الثلاثي حتى أسجّلك ❤️"
 
     # ====== medical ======
     if intent == "medical":
-        # لكن إذا أكو عدد أسنان + خدمة → نحسب سعر مو طب
-        if session["teeth_count"] and detect_service(t) != "غير محددة":
+        # إذا بيها عدد أسنان وخدمة → سعر مو طب
+        if session.get("teeth_count") and detect_service(text) != "غير محددة":
             return get_price_answer(session)
 
-        session["last_service"] = detect_service(t)
-        session["last_intent"] = "medical"
         r = medical_ai(uid, text)
-        return r + "\n\nإذا تحب أفحصك وأسجّلك موعد، دز اسمك ورقمك ♥️"
+        return r + "\n\nإذا تحب نحجزلك موعد حتى الدكتور يشوفها، دز اسمك ورقمك ♥️"
 
     # ====== normal ======
-    session["last_intent"] = "normal"
     return ask_ai(uid, text)
 
 
@@ -295,35 +310,32 @@ def get_price_answer(session):
 
     if service == "تغليف زركون":
         if cnt:
-            cost = 75000 * cnt
-            return f"حبي تغليف {cnt} أسنان يطلع تقريباً {cost:,} دينار (75 ألف للسن الواحد) ❤️"
-        return "سعر تغليف الزركون 75 ألف للسن الواحد ❤️"
+            return f"حبي تغليف {cnt} أسنان يطلع تقريباً {cnt * 75000:,} دينار ❤️"
+        return "سعر تغليف الزركون 75 ألف للسن ❤️"
 
     if service == "تغليف زركون إيماكس":
         if cnt:
-            cost = 100000 * cnt
-            return f"تغليف {cnt} أسنان إيماكس يطلع تقريباً {cost:,} دينار ❤️"
-        return "الإيماكس 100 ألف للسن الواحد ❤️"
+            return f"تغليف {cnt} أسنان إيماكس يطلع تقريباً {cnt * 100000:,} دينار ❤️"
+        return "سعر الإيماكس 100 ألف للسن ❤️"
 
     if service == "تبييض الأسنان":
-        return "تبييض الأسنان بالليزر تقريباً 100 ألف للجلسة ✨"
-
-    if service == "تقويم الأسنان":
-        return "التقويم 450 ألف للفك 🙏"
+        return "تبييض الأسنان 100 ألف للجلسة ✨"
 
     if service == "تنظيف الأسنان":
         return "تنظيف الأسنان 25 ألف 🌟"
 
-    if service == "حشوة جذر":
-        return "حشوة الجذر تقريباً 125 ألف حسب حالة السن."
+    if service == "تقويم الأسنان":
+        return "التقويم 450 ألف للفك 🙏"
 
     if service == "حشوة تجميلية":
         return "الحشوة التجميلية 35 ألف ✨"
 
-    if service == "قلع سن":
-        return "القلع العادي 25 ألف والجراحي 75 ألف."
+    if service == "حشوة جذر":
+        return "حشوة الجذر تقريباً 125 ألف حسب الحالة."
 
-    # Default
+    if service == "قلع سن":
+        return "القلع من 25 إلى 75 ألف حسب الحالة."
+
     return (
         "الأسعار الأساسية:\n"
         "• الزركون 75 ألف\n"
@@ -341,36 +353,34 @@ def get_price_answer(session):
 # ============= 11) MEDICAL AI =============
 def medical_ai(uid, text):
     try:
-        rsp = client.chat.completions.create(
+        res = client.chat.completions.create(
             model="gpt-4o",
             messages=[
-                {"role": "system", "content":
-                 "انت مساعد طبي لطبيب أسنان. ممنوع تشخيص أو وصف دواء. جاوب باحتمالات وطمأنة فقط."},
+                {"role": "system", "content": "انت مساعد طبي. ممنوع تشخيص أو أدوية. جاوب باحتمالات وتهدئة."},
                 {"role": "user", "content": text}
             ],
             max_tokens=200
         )
-        return rsp.choices[0].message.content.strip()
+        return res.choices[0].message.content.strip()
     except:
-        return "الوصف يشير لمشكلة ممكن تكون بسيطة، بس نحتاج فحص حتى نحدد بالضبط 🙏"
+        return "الوصف يشير لمشكلة تحتاج فحص، إذا أكو ألم قوي أو ورم لازم تراجع طبيب 🙏"
 
 
 # ============= 12) CHAT AI =============
 def ask_ai(uid, text):
     session = get_session(uid)
 
-    conv = [{"role": "system", "content":
-             "انت علي موظف كولدن لاين، تحجي لبق ومختصر بالعراقي."}]
+    conv = [{"role": "system", "content": "انت علي موظف كولدن لاين، تحجي لبق ومختصر."}]
     conv.extend(session["history"])
     conv.append({"role": "user", "content": text})
 
     try:
-        rsp = client.chat.completions.create(
+        res = client.chat.completions.create(
             model="gpt-4o",
             messages=conv,
             max_tokens=200
         )
-        out = rsp.choices[0].message.content.strip()
+        out = res.choices[0].message.content.strip()
     except:
         out = "صار خلل بسيط، عيد الرسالة حبي 🙏"
 
@@ -398,7 +408,7 @@ def normalize_phone(t):
     return None
 
 
-# ============= 14) WHATSAPP SEND (DIRECT) =============
+# ============= 14) WHATSAPP SEND =============
 def send_to_whatsapp(name, phone, service):
     try:
         msg = f"حجز جديد:\\nالاسم: {name}\\nرقم: {phone}\\nالخدمة: {service}"
@@ -408,15 +418,14 @@ def send_to_whatsapp(name, phone, service):
         pass
 
 
-# ============= 15) SEND TO FB =============
+# ============= 15) FB SEND =============
 def send_message(uid, text):
     if not PAGE_ACCESS_TOKEN:
         return
     url = "https://graph.facebook.com/v18.0/me/messages"
-    params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": uid}, "message": {"text": text}}
     try:
-        requests.post(url, params=params, json=payload, timeout=10)
+        requests.post(url, params={"access_token": PAGE_ACCESS_TOKEN}, json=payload, timeout=10)
     except:
         pass
 
@@ -424,7 +433,7 @@ def send_message(uid, text):
 # ============= 16) ROUTES =============
 @app.route("/", methods=["GET"])
 def home():
-    return "Golden Line Bot v4.7 ✔️"
+    return "Golden Line Bot v4.8 ✔️"
 
 
 @app.route("/webhook", methods=["GET"])
