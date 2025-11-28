@@ -20,7 +20,7 @@ SESSIONS = {}
 BUFFER_DELAY = 15
 MEMORY_TIMEOUT = 900  # 15 min
 
-# واتساب – ثابت
+# واتساب ثابت
 WHATSAPP_URL = "https://api.callmebot.com/whatsapp.php?phone=9647818931201&apikey=8423339&text="
 
 
@@ -39,16 +39,19 @@ threading.Thread(target=cleaner_daemon, daemon=True).start()
 
 
 # ============================================================
-#     📌 استخراج الاسم + الرقم من أي رسالة
+#     📌 استخراج الرقم بالشروط (يبدي 07 وطوله 11)
 # ============================================================
-
 def extract_phone(text):
     for word in text.split():
         w = word.strip()
-        if w.startswith("07") and w[2:].isdigit() and len(w) >= 10:
+        if w.startswith("07") and len(w) == 11 and w.isdigit():
             return w
     return None
 
+
+# ============================================================
+#     📌 استخراج اسم (إذا موجود)
+# ============================================================
 def extract_name(text):
     cleaned = ''.join([c if not c.isdigit() else ' ' for c in text])
     if any('\u0600' <= c <= '\u06FF' for c in cleaned) and " " in cleaned:
@@ -57,7 +60,7 @@ def extract_name(text):
 
 
 # ============================================================
-#     ☎️ إرسال الحجز للواتساب
+#     📌 إرسال الحجز للواتساب
 # ============================================================
 def send_whatsapp_booking(name, phone):
     msg = f"حجز جديد:\nالاسم: {name}\nالرقم: {phone}\nالخدمة: معاينة مجانية"
@@ -66,7 +69,7 @@ def send_whatsapp_booking(name, phone):
 
 
 # ============================================================
-#     🧠 دمج الرسائل 15 ثانية
+#     💬 دمج الرسائل 15 ثانية
 # ============================================================
 def schedule_reply(user_id):
     time.sleep(BUFFER_DELAY)
@@ -78,7 +81,7 @@ def schedule_reply(user_id):
     now = time.time()
     if now - st["last_message_time"] >= BUFFER_DELAY:
 
-        combined_text = " ".join(st["history"])
+        combined_text = st["history"][-1] if st["history"] else ""
         reply = ask_openai(user_id, combined_text)
         send_message(user_id, reply)
 
@@ -93,97 +96,59 @@ def add_user_message(user_id, text):
     if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT):
         SESSIONS[user_id] = {
             "history": [],
-            "state": "idle",
             "name": "",
             "phone": "",
             "last_message_time": now
         }
 
     st = SESSIONS[user_id]
-
     st["history"].append(text)
     st["last_message_time"] = now
 
     # ============================================================
-    #     💥 NEW: إذا برسالة وحدة بيها اسم + رقم يكمل الحجز فورًا
+    #   🔥 الحجز الفوري بمجرد ظهور رقم صحيح
     # ============================================================
     phone = extract_phone(text)
     name = extract_name(text)
 
-    if phone and name:
-        st["name"] = name
+    if phone:
+        final_name = name if name else (st["name"] if st["name"] else "بدون اسم")
+
         st["phone"] = phone
+        st["name"] = final_name
 
-        send_whatsapp_booking(name, phone)
+        # إرسال واتساب
+        send_whatsapp_booking(final_name, phone)
 
+        # إرسال رسالة تأكيد
         send_message(
             user_id,
-            f"تم تثبيت الحجز 🌟\n"
-            f"الاسم: {name}\n"
+            f"تم تثبيت موعدك مباشرة 🌟\n"
+            f"الاسم: {final_name}\n"
             f"الرقم: {phone}\n"
-            f"الخدمة: معاينة مجانية\n"
-            "راح نتواصل وياك خلال لحظات ❤️"
+            "الخدمة: معاينة مجانية\n"
+            "قسم المتابعة راح يتواصل وياك خلال لحظات ❤️"
         )
 
-        st["state"] = "idle"
         return
 
     # ============================================================
-    #     مراحل الحجز التقليدية
+    #     إذا مو رقم → نروح للذكاء الصناعي
     # ============================================================
-
-    if st["state"] == "idle" and ("احجز" in text or "حجز" in text):
-        st["state"] = "waiting_name"
-        send_message(user_id, "تمام حبيبي، دزلي اسمك الثلاثي حتى أسجّلك ❤️")
-        return
-
-    if st["state"] == "waiting_name":
-        if phone:
-            send_message(user_id, "حبي هذا رقم – دزلي اسمك الثلاثي فقط ❤️")
-            return
-        if not name:
-            send_message(user_id, "دزلي اسمك الثلاثي حتى أسجّلك ❤️")
-            return
-
-        st["name"] = name
-        st["state"] = "waiting_phone"
-        send_message(user_id, "تمام، هسه دزلي رقم هاتفك يبدي بـ 07 📱")
-        return
-
-    if st["state"] == "waiting_phone":
-        if not phone:
-            send_message(user_id, "دزلي رقمك الصحيح يبدي بـ 07 حتى أكملك الحجز ❤️")
-            return
-
-        st["phone"] = phone
-        st["state"] = "booking_ready"
-
-        send_whatsapp_booking(st["name"], st["phone"])
-
-        send_message(
-            user_id,
-            f"تم تثبيت الحجز 🌟\n"
-            f"الاسم: {st['name']}\n"
-            f"الرقم: {st['phone']}\n"
-            f"الخدمة: معاينة مجانية\n"
-            "راح نتواصل وياك خلال لحظات ❤️"
-        )
-
-        st["state"] = "idle"
-        return
-
     threading.Thread(target=schedule_reply, args=(user_id,)).start()
 
 
 # ============================================================
-#     🤖 GPT RESPONSE
+#     🤖 GPT RESPONSE — الهستري كمراجعة فقط
 # ============================================================
 def ask_openai(user_id, combined_text):
     st = SESSIONS[user_id]
-    history_text = " | ".join(st["history"])
+
+    # الهستري يُرسل كـ SYSTEM فقط ولا يُعامل كرسائل مستخدم
+    history_text = " | ".join(st["history"][:-1])  # بدون آخر رسالة
 
     # ============================================================
-    #     📌 الـ PROMPT اللي انت طلبته حرفيًا بدون تغيير
+    #     📌 الـ PROMPT كما أرسلته أنت حرفياً بدون أي تعديل
     # ============================================================
     big_prompt = """
 انت اسمك علي موضف الكول سنتر بعيادة كولدن لاين،
@@ -237,7 +202,11 @@ def ask_openai(user_id, combined_text):
 
     messages = [
         {"role": "system", "content": big_prompt},
-        {"role": "user", "content": f"هذا history لفهم صياغ الكلام فقط:\n{history_text}"},
+
+        # التاريخ كمراجعة System فقط — ما ينرد عليه نهائياً
+        {"role": "system", "content": f"هذا history لفهم السياق فقط:\n{history_text}"},
+
+        # آخر رسالة فقط
         {"role": "user", "content": combined_text}
     ]
 
@@ -256,7 +225,7 @@ def ask_openai(user_id, combined_text):
 
 @app.route("/", methods=["GET"])
 def home():
-    return "GoldenLine v5.4 Running"
+    return "GoldenLine v5.8 Running"
 
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -286,7 +255,7 @@ def webhook():
 
 
 # ============================================================
-#     إرسال رسالة للفيسبوك
+#     إرسال رسالة لفيسبوك
 # ============================================================
 def send_message(receiver, text):
     url = "https://graph.facebook.com/v18.0/me/messages"
