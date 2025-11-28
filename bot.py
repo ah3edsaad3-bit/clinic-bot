@@ -13,7 +13,7 @@ VERIFY_TOKEN = "goldenline_secret"
 
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-WHATSAPP_API = os.getenv("WHATSAPP_API")
+WHATSAPP_API = os.getenv("https://api.callmebot.com/whatsapp.php?phone=9647818931201&text=This+is+a+test&apikey=8423339")
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
