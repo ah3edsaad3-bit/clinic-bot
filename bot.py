@@ -50,6 +50,9 @@ def new_session():
         "teeth_count": None,
         "last_time": time.time(),
         "last_active": time.time(),
+
+        "buffer_running": False,   # ← حل مشكلة التكرار
+
         "lock": threading.Lock()
     }
 
@@ -65,7 +68,7 @@ def get_session(uid):
         return sess
 
 
-# ============= 3) AUTO SESSION CLEANER (v4.1) =============
+# ============= 3) AUTO SESSION CLEANER (v4.3) =============
 def cleaner_job():
     while True:
         time.sleep(CLEANER_INTERVAL)
@@ -92,31 +95,28 @@ th_cleaner.daemon = True
 th_cleaner.start()
 
 
-# ============= 4) BUFFER HANDLER =============
+# ============= 4) BUFFER HANDLER (FIXED) =============
 def schedule_reply(uid):
     time.sleep(BUFFER_DELAY)
 
-    with SESSIONS_LOCK:
-        session = SESSIONS.get(uid)
+    session = SESSIONS.get(uid)
     if not session:
         return
 
-    now = time.time()
+    try:
+        with session["lock"]:
+            final_text = " ".join(session["messages_buffer"]).strip()
+            session["messages_buffer"] = []
+            session["buffer_running"] = False   # ← مفتاح الحل
 
-    with session["lock"]:
-        if (now - session["last_time"]) < BUFFER_DELAY:
-            return
+        if final_text:
+            log("Processing merged message:", final_text)
+            reply = process_user_message(uid, final_text)
+            send_message(uid, reply)
 
-        if not session["messages_buffer"]:
-            return
-
-        final_text = " ".join(session["messages_buffer"]).strip()
-        session["messages_buffer"] = []
-
-    if final_text:
-        log("Processing merged message:", final_text)
-        reply = process_user_message(uid, final_text)
-        send_message(uid, reply)
+    except Exception as e:
+        session["buffer_running"] = False
+        print("schedule_reply ERROR:", e)
 
 
 def add_message(uid, text):
@@ -126,6 +126,11 @@ def add_message(uid, text):
     with session["lock"]:
         session["messages_buffer"].append(text)
         session["last_time"] = now
+
+        # ← منع تكرار Threads
+        if session.get("buffer_running"):
+            return
+        session["buffer_running"] = True
 
     th = threading.Thread(target=schedule_reply, args=(uid,))
     th.daemon = True
@@ -142,11 +147,11 @@ def schedule_reminder(uid):
         send_message(uid, "بس أذكّرك حبي، إذا تريد نكمّل الحجز دزلي اسمك ورقمك ♥️")
 
 
-# ============= 6) IMPROVED detect_intent (v4.2) =============
+# ============= 6) IMPROVED detect_intent (v4.3) =============
 def detect_intent(txt: str) -> str:
     t = txt.lower().strip()
 
-    # 1) Booking → أعلى أولوية دائماً
+    # Booking (أولوية)
     booking_words = [
         "احجز", "حجز", "اريد احجز", "اريد موعد",
         "موعد", "سجلني", "ثبت الحجز", "خلي احجز"
@@ -154,13 +159,13 @@ def detect_intent(txt: str) -> str:
     if any(w in t for w in booking_words):
         return "booking"
 
-    # 2) Price
+    # Price
     if re.search(r"\b(عرض|عروض|سعر|اسعار|شكد|كم|التكلفة|الكلفة)\b", t):
         return "price"
-    if any(w in t for w in ["تبييض", "تبيض", "يبيض", "يبيش"]):
+    if any(w in t for w in ["تبييض", "تبيض"]):
         return "price"
 
-    # 3) Medical
+    # Medical
     medical_words = [
         "يوجع", "وجع", "ألم", "ورم", "انتفاخ",
         "التهاب", "يلتهب", "ينزف", "نزف",
@@ -207,21 +212,17 @@ def detect_service(txt: str) -> str:
     return "غير محددة"
 
 
-# ============= 8) IMPROVED TEETH COUNT (v4.2) =============
+# ============= 8) IMPROVED TEETH COUNT =============
 def extract_teeth_count(txt: str):
-    # تحسين اللهجة العراقية
     txt = txt.replace("سنين", "2 سن").replace("سنان", "2 سن")
 
-    # تحويل أرقام عربية إلى انجليزية
     arabic_to_en = str.maketrans("٠١٢٣٤٥٦٧٨٩", "0123456789")
     cleaned = txt.translate(arabic_to_en)
 
-    # 1) رقم + سن
     m = re.search(r"(\d+)\s*(سن|سنة|اسنان)", cleaned)
     if m:
         return int(m.group(1))
 
-    # 2) كلمات
     words = {
         "واحد": 1, "واحدة": 1,
         "اثنين": 2, "ثنين": 2,
@@ -234,7 +235,6 @@ def extract_teeth_count(txt: str):
         if w in txt:
             return n
 
-    # 3) رقم + خدمة (جديد)
     service_keywords = [
         "زركون", "تغليف", "تلبيسة", "تلبيسات",
         "crown", "جسر", "ايماكس", "emax"
@@ -257,7 +257,6 @@ def process_user_message(uid, text):
     st = session["state"]
     txt_clean = text.strip()
 
-    # اغلاق الجلسة
     count = extract_teeth_count(txt_clean)
     if count:
         session["teeth_count"] = count
@@ -299,7 +298,6 @@ def process_user_message(uid, text):
 
         return msg
 
-    # detect intent
     intent = detect_intent(txt_clean)
     session["last_intent"] = intent
 
@@ -487,7 +485,7 @@ def send_message(uid, text):
 # ============= 16) ROUTES =============
 @app.route("/", methods=["GET"])
 def home():
-    return "Golden Line bot v4.2 ✔️"
+    return "Golden Line bot v4.3 ✔️"
 
 
 @app.route("/webhook", methods=["GET"])
