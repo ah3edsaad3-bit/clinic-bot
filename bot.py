@@ -209,21 +209,25 @@ def add_user_message(user_id, text):
         send_whatsapp_report()
         return
 
-    # جلسة جديدة
-    if (
-        user_id not in SESSIONS
-        or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT)
-    ):
-        SESSIONS[user_id] = {
-            "history": [],
-            "name": "",
-            "phone": "",
-            "last_message_time": now,
-            "followup_sent": False
-        }
-        
- # 👇 إرسال الإيموجي عند فتح الجلسة
+   # جلسة جديدة
+if (
+    user_id not in SESSIONS
+    or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT)
+):
+    SESSIONS[user_id] = {
+        "history": [],
+        "name": "",
+        "phone": "",
+        "last_message_time": now,
+        "followup_sent": False,
+        "greeted": False
+    }
+
+# إرسال الإيموجي لأول مرة فقط
+if not SESSIONS[user_id]["greeted"]:
     send_message(user_id, "👋")
+    SESSIONS[user_id]["greeted"] = True
+
     
     st = SESSIONS[user_id]
     st["history"].append(text)
