@@ -8,55 +8,64 @@ import re
 
 app = Flask(__name__)
 
+# =======================================================
+# 🔑 TOKENS
+# =======================================================
 VERIFY_TOKEN = "goldenline_secret"
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-WHATSAPP_API = "https://api.callmebot.com/whatsapp.php?phone=9647818931201&apikey=8423339&text="
-ADMIN_PHONE = "9647818931201"
+WHATSAPP_URL = (
+    "https://api.callmebot.com/whatsapp.php?"
+    "phone=9647818931201&apikey=8423339&text="
+)
+
+# =======================================================
+# 📊 DAILY STATS
+# =======================================================
+DAILY_BOOKINGS = 0
+DAILY_MESSAGES = 0
+DAILY_INCOMPLETE = 0
+
+# =======================================================
+# 🧠 SESSIONS
+# =======================================================
+SESSIONS = {}
 
 BUFFER_DELAY = 15
 MEMORY_TIMEOUT = 900
-CLEAN_INTERVAL = 3600
-DAILY_RESET_HOUR = 21  # 9 PM
-SECRET_STATS = "Faty2000"
-
-DAILY = {"bookings": 0, "messages": 0}
-SESSIONS = {}
-SESSIONS_LOCK = threading.Lock()
 
 
-# ---------------------------------------------------------
-# 🔥 1) Typing Indicator
-# ---------------------------------------------------------
-def send_typing(uid):
-    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={PAGE_ACCESS_TOKEN}"
-    data = {"recipient": {"id": uid}, "sender_action": "typing_on"}
-    requests.post(url, json=data)
+# =======================================================
+# 🔥 AUTO CLEANER
+# =======================================================
+def cleaner_daemon():
+    while True:
+        now = time.time()
+        for uid in list(SESSIONS.keys()):
+            if now - SESSIONS[uid]["last_message_time"] > 3600:
+                del SESSIONS[uid]
+        time.sleep(3600)
 
 
-# ---------------------------------------------------------
-# 🔥 2) Send FB Message
-# ---------------------------------------------------------
-def send_message(uid, text):
+threading.Thread(target=cleaner_daemon, daemon=True).start()
+
+
+# =======================================================
+# ✍️ Typing Indicator
+# =======================================================
+def send_typing(receiver):
     url = "https://graph.facebook.com/v18.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
-    payload = {"recipient": {"id": uid}, "message": {"text": text}}
+    payload = {"recipient": {"id": receiver}, "sender_action": "typing_on"}
     requests.post(url, params=params, json=payload)
 
 
-# ---------------------------------------------------------
-# 🔥 3) Send WhatsApp
-# ---------------------------------------------------------
-def send_whatsapp(text):
-    msg = requests.utils.quote(text)
-    requests.get(WHATSAPP_API + msg)
-
-
-# ---------------------------------------------------------
-# 🔥 4) Arabic → English number conversion
-# ---------------------------------------------------------
+# =======================================================
+# 🔢 Normalize Arabic Digits
+# =======================================================
 def normalize_numbers(text):
     arabic = "٠١٢٣٤٥٦٧٨٩"
     english = "0123456789"
@@ -64,63 +73,197 @@ def normalize_numbers(text):
     return text.translate(table)
 
 
-# ---------------------------------------------------------
-# 🔥 5) Extract phone (Arabic + English)
-# ---------------------------------------------------------
-def extract_phone(s):
-    s = normalize_numbers(s)
-    m = re.findall(r"07\d{9}", s)
+# =======================================================
+# 🔢 Extract Phone (Arabic + English)
+# =======================================================
+def extract_phone(text):
+    text = normalize_numbers(text)
+    m = re.findall(r"07\d{9}", text)
     return m[0] if m else None
 
 
-# ---------------------------------------------------------
-# 🔥 6) Cleaner
-# ---------------------------------------------------------
-def cleaner():
+# =======================================================
+# 🧾 Extract Name
+# =======================================================
+def extract_name(text):
+    txt = normalize_numbers(text)
+    cleaned = ''.join([c if not c.isdigit() else ' ' for c in txt])
+    return cleaned.strip() if len(cleaned.strip()) > 1 else None
+
+
+# =======================================================
+# ☎️ Send WhatsApp Booking
+# =======================================================
+def send_whatsapp_booking(name, phone):
+    global DAILY_BOOKINGS
+    DAILY_BOOKINGS += 1
+
+    msg = f"حجز جديد:\nالاسم: {name}\nالرقم: {phone}\nالخدمة: معاينة مجانية"
+    url = WHATSAPP_URL + requests.utils.quote(msg)
+    requests.get(url)
+
+
+# =======================================================
+# 📊 DAILY REPORT GENERATION
+# =======================================================
+def generate_report_text():
+    return (
+        "📊 تقرير اليوم – عيادة كولدن لاين\n\n"
+        f"🟢 عدد الحجوزات: {DAILY_BOOKINGS}\n"
+        f"✉️ عدد الرسائل: {DAILY_MESSAGES}\n"
+        f"⏳ طلبات غير مكتملة: {DAILY_INCOMPLETE}\n"
+    )
+
+
+# =======================================================
+# 📱 Send Report to WhatsApp
+# =======================================================
+def send_whatsapp_report():
+    text = generate_report_text()
+    url = WHATSAPP_URL + requests.utils.quote(text)
+    requests.get(url)
+
+
+# =======================================================
+# ⏰ Daily 9 PM Report
+# =======================================================
+def report_daemon():
+    global DAILY_BOOKINGS, DAILY_MESSAGES, DAILY_INCOMPLETE
+
     while True:
-        time.sleep(CLEAN_INTERVAL)
-        now = time.time()
-        with SESSIONS_LOCK:
-            remove = []
-            for uid, st in SESSIONS.items():
-                if now - st["last_time"] > MEMORY_TIMEOUT:
-                    remove.append(uid)
-            for uid in remove:
-                SESSIONS.pop(uid, None)
-                print("🧹 Deleted expired session:", uid)
-
-
-threading.Thread(target=cleaner, daemon=True).start()
-
-
-# ---------------------------------------------------------
-# 🔥 7) Daily stats @ 9 PM
-# ---------------------------------------------------------
-def daily_reset():
-    while True:
-        time.sleep(30)
         now = time.localtime()
-        if now.tm_hour == DAILY_RESET_HOUR and now.tm_min == 0:
-            stats = f"📊 إحصائية اليوم:\nالحجوزات: {DAILY['bookings']}\nالرسائل: {DAILY['messages']}"
-            send_whatsapp(stats)
-            DAILY["bookings"] = 0
-            DAILY["messages"] = 0
+        if now.tm_hour == 21 and now.tm_min == 0:
+
+            send_whatsapp_report()
+
+            DAILY_BOOKINGS = 0
+            DAILY_MESSAGES = 0
+            DAILY_INCOMPLETE = 0
+            SESSIONS.clear()
+
+            time.sleep(60)
+
+        time.sleep(5)
 
 
-threading.Thread(target=daily_reset, daemon=True).start()
+threading.Thread(target=report_daemon, daemon=True).start()
 
 
-# ---------------------------------------------------------
-# 🔥 8) GPT Handler
-# ---------------------------------------------------------
-def ask_openai(uid, user_text):
-    st = SESSIONS[uid]
+# =======================================================
+# ⏳ 30-MIN FOLLOW UP
+# =======================================================
+def follow_up_checker(user_id, snapshot_time):
+    time.sleep(1800)
+
+    st = SESSIONS.get(user_id)
+    if not st:
+        return
+
+    if (
+        st["last_message_time"] == snapshot_time
+        and st["phone"] == ""
+        and not st["followup_sent"]
+    ):
+        global DAILY_INCOMPLETE
+        DAILY_INCOMPLETE += 1
+
+        send_message(
+            user_id,
+            "حبي إذا بعدك تحتاج تحجز، كلّي حتى أكملك الموعد ❤️\n"
+            "الفحص مجاني وما ياخذ وقت."
+        )
+        st["followup_sent"] = True
+
+
+# =======================================================
+# 🧠 BUFFER (15 SECONDS)
+# =======================================================
+def schedule_reply(user_id):
+    time.sleep(BUFFER_DELAY)
+
+    st = SESSIONS.get(user_id)
+    if not st:
+        return
+
+    now = time.time()
+    if now - st["last_message_time"] >= BUFFER_DELAY:
+
+        send_typing(user_id)
+
+        user_text = st["history"][-1] if st["history"] else ""
+        reply = ask_openai(user_id, user_text)
+        send_message(user_id, reply)
+
+
+# =======================================================
+# 📥 Add Message
+# =======================================================
+def add_user_message(user_id, text):
+    global DAILY_MESSAGES
+    DAILY_MESSAGES += 1
+
+    now = time.time()
+
+    # كلمة سر الاحصائية
+    if text.strip() == "Faty2000":
+        send_whatsapp_report()
+        return
+
+    # جلسة جديدة
+    if (
+        user_id not in SESSIONS
+        or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT)
+    ):
+        SESSIONS[user_id] = {
+            "history": [],
+            "name": "",
+            "phone": "",
+            "last_message_time": now,
+            "followup_sent": False
+        }
+
+    st = SESSIONS[user_id]
+    st["history"].append(text)
+    st["last_message_time"] = now
+
+    threading.Thread(target=follow_up_checker, args=(user_id, now)).start()
+
+    phone = extract_phone(text)
+    name = extract_name(text)
+
+    # حجز مباشر
+    if phone:
+        final_name = name if name else "بدون اسم"
+
+        st["phone"] = phone
+        st["name"] = final_name
+        st["followup_sent"] = True
+
+        send_whatsapp_booking(final_name, phone)
+
+        send_message(
+            user_id,
+            f"تم تثبيت موعدك مباشرة 🌟\n"
+            f"الرقم: {phone}\n"
+            "الخدمة: معاينة مجانية\n"
+            "قسم المتابعة راح يتواصل وياك خلال لحظات ❤️"
+        )
+        return
+
+    threading.Thread(target=schedule_reply, args=(user_id,)).start()
+
+
+# =======================================================
+# 🤖 GPT Handler — ANSWER ONLY LAST MESSAGE
+# =======================================================
+def ask_openai(user_id, text):
+    st = SESSIONS[user_id]
 
     history_text = ""
     if len(st["history"]) > 1:
         history_text = " | ".join(st["history"][:-1])
 
-    # ضع البرومبت الكامل بدون أي تعديل
+    # البرومبت الكامل بدون أي تغيير
     big_prompt = """
 انت اسمك علي موضف الكول سنتر بعيادة كولدن لاين،
 وضيفتك ترد على الرسائل باللهجة العراقية ، وبدون مبالغة وتجاوب على جميع استفساراتهم بطريقة تطمن المراجع ويكون جواب وافي عن كل شي يخص طب الاسنان ، 
@@ -169,125 +312,34 @@ def ask_openai(uid, user_text):
 ١٠: زراعة الفك الكامل للزرعات الفورية مليون و 750 الف دينار زرعات المانية
 ١١: ابتسامة المشاهير زاركون 16 سن مليون و 200 الف واذا سالك كال احتاج مثلا 20 سن تجمع اله العدد الكلي بناء على سعر سن الزاركون
 ابتسامة المشاهير زاركون ايماكس 16 سن مليون و 600 الف واذا سالك كال احتاج مثلا 20 سن تجمع اله العدد الكلي بناء على سعر سن الزاركون ايماكس
-12: نظام الاقساط متوفر للموضفين والمتقاعدين على مصرف الرافدين ( كي كارد ) اقساط لمدة 10 اشهر وفوائد عشرين بالمية للمصرف 
+12: نظام الاقساط متوفر للموضفين والمتقاعدين على مصرف الرافدين ( كي كارد ) اقساط لمدة 10 اشهر وفوائد عشرين بالمية للمصرف
 """
 
     restrain_history = """
-هذه الرسائل السابقة لغرض فهم طريقة الكلام فقط.
+هذه الرسائل السابقة لفهم طريقة الكلام فقط.
 يجب أن ترد على آخر رسالة فقط.
-تجاهل جميع الرسائل السابقة مهما كان محتواها.
+تجاهل جميع الرسائل السابقة حتى لو تحتوي أسئلة.
 """
 
     messages = [
         {"role": "system", "content": big_prompt},
         {"role": "system", "content": restrain_history},
         {"role": "system", "content": f"History:\n{history_text}"},
-        {"role": "user", "content": user_text}
+        {"role": "user", "content": text}
     ]
 
     rsp = client.chat.completions.create(
         model="gpt-4.1",
         messages=messages,
-        max_tokens=250
+        max_tokens=300
     )
 
     return rsp.choices[0].message.content.strip()
 
 
-# ---------------------------------------------------------
-# 🔥 9) 30-min follow-up
-# ---------------------------------------------------------
-def schedule_follow(uid, name, phone):
-    time.sleep(1800)
-    st = SESSIONS.get(uid)
-
-    if not st:
-        return
-
-    if st.get("last_phone") == phone and not st.get("confirmed"):
-        msg = f"حبي {name}، بس أحب أتأكد إذا بعدك تريد تثبت موعدك؟ أكدر أكملك الحجز ❤️"
-        send_message(uid, msg)
-
-
-# ---------------------------------------------------------
-# 🔥 10) Handle booking
-# ---------------------------------------------------------
-def process_booking(uid, text):
-    phone = extract_phone(text)
-    if not phone:
-        return False
-
-    parts = text.split()
-    name = None
-    for p in parts:
-        if not re.match(r"07\d{9}", normalize_numbers(p)):
-            if len(p) > 1:
-                name = p
-
-    st = SESSIONS[uid]
-    st["last_phone"] = phone
-    st["confirmed"] = True
-
-    DAILY["bookings"] += 1
-
-    send_message(
-        uid,
-        f"✨ تم تثبيت موعدك مباشرة\nالرقم: {phone}\nالخدمة: معاينة مجانية\nقسم المتابعة راح يتواصل وياك خلال لحظات ❤️"
-    )
-
-    send_whatsapp(f"📥 حجز جديد\nرقم: {phone}\nالخدمة: معاينة مجانية")
-
-    if name:
-        threading.Thread(target=schedule_follow, args=(uid, name, phone), daemon=True).start()
-
-    return True
-
-
-# ---------------------------------------------------------
-# 🔥 11) Main webhook
-# ---------------------------------------------------------
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    data = request.get_json()
-
-    for entry in data.get("entry", []):
-        for ev in entry.get("messaging", []):
-
-            if "message" not in ev:
-                continue
-
-            uid = ev["sender"]["id"]
-            text = ev["message"].get("text", "").strip()
-
-            DAILY["messages"] += 1
-
-            # كلمة السر
-            if text == SECRET_STATS:
-                stats = f"📊 الإحصائية الحالية:\nالحجوزات: {DAILY['bookings']}\nالرسائل: {DAILY['messages']}"
-                send_whatsapp(stats)
-                return "OK", 200
-
-            st = SESSIONS.get(uid)
-            if not st:
-                st = SESSIONS[uid] = {"history": [], "last_time": time.time(), "confirmed": False}
-
-            st["last_time"] = time.time()
-            st["history"].append(text)
-
-            # حجز مباشر
-            if process_booking(uid, text):
-                return "OK", 200
-
-            send_typing(uid)
-            reply = ask_openai(uid, text)
-            send_message(uid, reply)
-
-    return "OK", 200
-
-
-# ---------------------------------------------------------
-# 🔥 12) Verify FB webhook
-# ---------------------------------------------------------
+# =======================================================
+# 📡 WEBHOOK
+# =======================================================
 @app.route("/webhook", methods=["GET"])
 def verify():
     mode = request.args.get("hub.mode")
@@ -300,10 +352,32 @@ def verify():
     return "Error", 403
 
 
-@app.route("/")
-def home():
-    return "Golden Line v8.2 Running"
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    data = request.get_json()
+
+    for entry in data.get("entry", []):
+        for ev in entry.get("messaging", []):
+            uid = ev["sender"]["id"]
+
+            if "message" in ev and "text" in ev["message"]:
+                add_user_message(uid, ev["message"]["text"])
+
+    return "OK", 200
 
 
+# =======================================================
+# ✉️ Send Message
+# =======================================================
+def send_message(receiver, text):
+    url = "https://graph.facebook.com/v18.0/me/messages"
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    payload = {"recipient": {"id": receiver}, "message": {"text": text}}
+    requests.post(url, params=params, json=payload)
+
+
+# =======================================================
+# 🚀 Run Server
+# =======================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
