@@ -221,7 +221,10 @@ def add_user_message(user_id, text):
             "last_message_time": now,
             "followup_sent": False
         }
-
+        
+ # 👇 إرسال الإيموجي عند فتح الجلسة
+    send_message(user_id, "👋")
+    
     st = SESSIONS[user_id]
     st["history"].append(text)
     st["last_message_time"] = now
