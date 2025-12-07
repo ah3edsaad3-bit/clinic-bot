@@ -146,7 +146,7 @@ def follow_up_checker(user_id, snapshot_time):
         DAILY_INCOMPLETE += 1
         send_message(
             user_id,
-            "حبي إذا بعدك تحتاج تحجز، كلّي حتى أكملك الموعد ❤️\n"
+            " إذا بعدك تحتاج تحجز، كلّي حتى أكملك الموعد ❤️\n"
             "الفحص مجاني وما ياخذ وقت."
         )
         st["followup_sent"] = True
