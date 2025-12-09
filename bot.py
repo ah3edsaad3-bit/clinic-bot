@@ -249,7 +249,7 @@ def save_booking_to_sheet(b):
         "time": b["time"],
         "status": "Pending"
     }
-    requests.post(BOOKING_API_URL, data=payload)
+    requests.post(BOOKING_API_URL, json=payload)
 
 
 # =======================================================
