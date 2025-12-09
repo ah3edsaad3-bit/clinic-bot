@@ -23,7 +23,7 @@ WHATSAPP_URL = (
     "phone=9647818931201&apikey=8423339&text="
 )
 
-# Google Sheet API URL (booking sheet)
+# Google Sheet API URL
 BOOKING_API_URL = "https://script.google.com/macros/s/AKfycbznSh6PeJodzuAqObqo9_kWIfgLoZHhrJ97C4pEXCXwD9JD4s3wZ9I93MRl0ot6d36-1g/exec"
 
 # =======================================================
@@ -37,8 +37,8 @@ DAILY_INCOMPLETE = 0
 # 🧠 SESSIONS
 # =======================================================
 SESSIONS = {}
-BUFFER_DELAY = 15          # seconds before replying
-MEMORY_TIMEOUT = 900       # 15 minutes for session reset
+BUFFER_DELAY = 15
+MEMORY_TIMEOUT = 900
 
 # =======================================================
 # 🔥 AUTO CLEANER
@@ -53,6 +53,7 @@ def cleaner_daemon():
 
 threading.Thread(target=cleaner_daemon, daemon=True).start()
 
+
 # =======================================================
 # ✍️ Typing Indicator
 # =======================================================
@@ -64,6 +65,7 @@ def send_typing(receiver):
     payload = {"recipient": {"id": receiver}, "sender_action": "typing_on"}
     requests.post(url, params=params, json=payload)
 
+
 # =======================================================
 # 🔢 Normalize Arabic Digits
 # =======================================================
@@ -73,248 +75,170 @@ def normalize_numbers(text):
     table = str.maketrans(arabic, english)
     return text.translate(table)
 
+
 # =======================================================
-# 🔢 Extract Phone (Arabic + English)
+# 🔢 Extract Phone
 # =======================================================
 def extract_phone(text):
     text = normalize_numbers(text)
     m = re.findall(r"07\d{9}", text)
     return m[0] if m else None
 
+
 # =======================================================
-# 🧾 Extract Name (simple heuristic)
+# 🧾 Extract Name
 # =======================================================
 def extract_name(text):
     txt = normalize_numbers(text)
     cleaned = ''.join([c if not c.isdigit() else ' ' for c in txt])
     return cleaned.strip() if len(cleaned.strip()) > 1 else None
 
-# =======================================================
-# ☎️ Send WhatsApp Booking (simple notification)
-# =======================================================
-def send_whatsapp_booking(name, phone, date, time_):
-    global DAILY_BOOKINGS
-    DAILY_BOOKINGS += 1
-    msg = (
-        "حجز جديد من البوت:\n"
-        f"الاسم: {name}\n"
-        f"الرقم: {phone}\n"
-        f"الخدمة: معاينة مجانية\n"
-        f"التاريخ: {date}\n"
-        f"الوقت: {time_}\n"
-    )
-    url = WHATSAPP_URL + requests.utils.quote(msg)
-    requests.get(url)
 
 # =======================================================
-# 📊 DAILY REPORT GENERATION
+# 📅 Convert Day Name → Actual Full Date
 # =======================================================
-def generate_report_text():
-    return (
-        "📊 تقرير اليوم – عيادة كولدن لاين\n\n"
-        f"🟢 عدد الحجوزات: {DAILY_BOOKINGS}\n"
-        f"✉️ عدد الرسائل: {DAILY_MESSAGES}\n"
-        f"⏳ طلبات غير مكتملة: {DAILY_INCOMPLETE}\n"
-    )
+def next_weekday_by_name(day_name):
+    days = {
+        "monday": 0, "tuesday": 1, "wednesday": 2,
+        "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+        "الاثنين": 0, "الثلاثاء": 1, "الاربعاء": 2, "الأربعاء": 2,
+        "الخميس": 3, "الجمعة": 4, "السبت": 5, "الاحد": 6, "الأحد": 6,
+    }
+
+    dn = day_name.strip().lower()
+    if dn not in days:
+        return None
+
+    target = days[dn]
+    today = datetime.now()
+
+    diff = target - today.weekday()
+    if diff <= 0:
+        diff += 7
+
+    result = today + timedelta(days=diff)
+    return result.strftime("%Y-%m-%d")
+
 
 # =======================================================
-# 📱 Send Report to WhatsApp
-# =======================================================
-def send_whatsapp_report():
-    text = generate_report_text()
-    url = WHATSAPP_URL + requests.utils.quote(text)
-    requests.get(url)
-
-# =======================================================
-# ⏰ Daily 9 PM Report
-# =======================================================
-def report_daemon():
-    global DAILY_BOOKINGS, DAILY_MESSAGES, DAILY_INCOMPLETE
-    while True:
-        now = time.localtime()
-        if now.tm_hour == 21 and now.tm_min == 0:
-            send_whatsapp_report()
-            DAILY_BOOKINGS = 0
-            DAILY_MESSAGES = 0
-            DAILY_INCOMPLETE = 0
-            SESSIONS.clear()
-            time.sleep(60)
-        time.sleep(5)
-
-threading.Thread(target=report_daemon, daemon=True).start()
-
-# =======================================================
-# ⏳ 30-MIN FOLLOW UP
-# =======================================================
-def follow_up_checker(user_id, snapshot_time):
-    time.sleep(1800)  # 30 minutes
-    st = SESSIONS.get(user_id)
-    if not st:
-        return
-    if (
-        st["last_message_time"] == snapshot_time
-        and st["phone"] == ""
-        and not st["followup_sent"]
-    ):
-        global DAILY_INCOMPLETE
-        DAILY_INCOMPLETE += 1
-        send_message(
-            user_id,
-            "إذا بعدك تحتاج تحجز، كلّي حتى أكملك الموعد ❤️\n"
-            "الفحص مجاني وما ياخذ وقت."
-        )
-        st["followup_sent"] = True
-
-# =======================================================
-# 🧠 BUFFER (15 SECONDS) – Chat Engine
-# =======================================================
-def schedule_reply(user_id):
-    time.sleep(BUFFER_DELAY)
-    st = SESSIONS.get(user_id)
-    if not st:
-        return
-    now = time.time()
-    if now - st["last_message_time"] >= BUFFER_DELAY:
-        send_typing(user_id)
-        user_text = st["history"][-1] if st["history"] else ""
-        reply = ask_openai_chat(user_id, user_text)
-        if reply:
-            send_message(user_id, reply)
-
-# =======================================================
-# 📥 Get last N messages
-# =======================================================
-def get_last_messages(user_id, limit=10):
-    st = SESSIONS.get(user_id, {})
-    history = st.get("history", [])
-    return history[-limit:]
-
-# =======================================================
-# 📅 Default Appointment Date (Tomorrow; if Friday → Saturday)
+# 📅 Default Appointment Date (Tomorrow except Friday)
 # =======================================================
 def get_default_date():
     today = datetime.now()
     tomorrow = today + timedelta(days=1)
-    # weekday(): Monday=0 ... Sunday=6; assume Friday=4
+
     if tomorrow.weekday() == 4:  # Friday
         tomorrow = tomorrow + timedelta(days=1)
+
     return tomorrow.strftime("%Y-%m-%d")
 
+
 # =======================================================
-# 🤖 GPT Booking Engine (separate from chat)
+# 📥 Get last 10 messages
 # =======================================================
-def analyze_booking(name, phone, last_msgs_text):
-    """
-    Uses GPT to:
-    - Infer patient name from history if possible
-    - Detect requested date/time if user specified
-    - Fallback: tomorrow at 16:00, skipping Friday -> Saturday
-    - Always service = معاينة مجانية
-    Returns dict with:
-      patient_name, patient_phone, service, date, time, ai_message
-    """
-    # Default values in case GPT fails
-    fallback_date = get_default_date()
-    fallback_time = "16:00"
+def get_last_messages(user_id, limit=10):
+    st = SESSIONS.get(user_id, {})
+    return st.get("history", [])[-limit:]
 
-    history_snippet = "\n".join(last_msgs_text) if isinstance(last_msgs_text, list) else str(last_msgs_text)
 
-    system_prompt = f"""
-أنت موظف حجز في عيادة كولدن لاين لطب وتجميل الأسنان.
-مهمتك أن تقرأ تاريخ المحادثة وتستخرج تفاصيل الحجز.
+# =======================================================
+# 🤖 GPT Booking Engine (separate)
+# =======================================================
+def analyze_booking(name, phone, last_msgs):
+    history_snippet = "\n".join(last_msgs)
 
-المعلومات:
-- إذا المراجع ما محدد موعد → خلي الموعد يكون غداً الساعة 4:00 عصراً.
-- إذا غداً يصادف جمعة، خلي الموعد يوم السبت بعدها.
-- إذا كال اليوم، خلي الموعد بتاريخ اليوم.
-- إذا كال باچر، خلي الموعد بتاريخ الغد (مع مراعاة الجمعة).
-- إذا ذكر يوم محدد مثل السبت الجاي أو الأحد القادم، حاول تستنتج التاريخ بالميلادي حسب المنطق.
-- أوقات الدوام من 4:00 مساءً إلى 9:00 مساءً. إذا طلب وقت خارج هذا النطاق تجاهله وخلي 4:00.
-- الخدمة دائماً "معاينة مجانية".
+    prompt = f"""
+اقرأ محادثة المراجع وحدد الموعد.
 
-اسم المراجع:
-- إذا هو كاتبه بالمحادثة، استخرجه.
-- إذا مو واضح، استخدم الاسم القادم من النظام إذا موجود، وإذا هم مو موجود خليه "بدون اسم".
+لا تحسب التاريخ بنفسك.
+إذا ذكر يوم مثل "الخميس" أو "السبت الجاي" → فقط رجّع "day_name" = اسم اليوم.
 
-رجّع الناتج بصيغة JSON فقط بدون أي نص زائد، بالشكل التالي بالضبط:
+الصيغـة المطلوبة بالإخراج:
 
 {{
-  "patient_name": "اسم المراجع",
-  "patient_phone": "{phone}",
-  "service": "معاينة مجانية",
-  "date": "YYYY-MM-DD",
-  "time": "HH:MM",
-  "ai_message": "نص الرسالة التي سترسل للمراجع لتأكيد الحجز، باللهجة العراقية وبأسلوب لطيف مع ذكر الاسم والرقم والخدمة والتاريخ والوقت والعنوان."
+ "patient_name": "اسم المراجع المستخرج إن وجد، أو الاسم الموجود",
+ "patient_phone": "{phone}",
+ "service": "معاينة مجانية",
+ "day_name": "Thursday أو السبت أو فاضي إذا ما مذكور",
+ "time": "HH:MM"  (إذا ما مذكور → 16:00)
 }}
 
-العنوان الثابت داخل الرسالة يكون:
-"بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين لطب وتجميل الأسنان".
+لا تُرجع أي شيء آخر غير JSON فقط.
 """
 
     try:
         rsp = client.chat.completions.create(
             model="gpt-4.1",
             messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": history_snippet},
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": history_snippet}
             ],
-            max_tokens=500,
+            max_tokens=300,
             temperature=0
         )
-        raw = rsp.choices[0].message.content.strip()
-        data = json.loads(raw)
 
-        # Basic validation / fallback
+        data = json.loads(rsp.choices[0].message.content)
+
+        # استخراج الاسم الصحيح
         patient_name = data.get("patient_name") or name or "بدون اسم"
-        patient_phone = data.get("patient_phone") or phone
-        service = data.get("service") or "معاينة مجانية"
-        date = data.get("date") or fallback_date
-        time_str = data.get("time") or fallback_time
-        ai_message = data.get("ai_message") or (
-            f"تم تثبيت موعدك ❤\n"
+
+        # استخراج اليوم
+        day_name = data.get("day_name", "").strip()
+
+        # تحويل اليوم → تاريخ كامل
+        if day_name:
+            converted_date = next_weekday_by_name(day_name)
+        else:
+            converted_date = get_default_date()
+
+        # الوقت
+        time_str = data.get("time") or "16:00"
+
+        # صياغة رسالة جميلة
+        ai_message = (
+            "تم تثبيت موعدك ❤\n"
             f"الاسم: {patient_name}\n"
-            f"رقم الهاتف: {patient_phone}\n"
-            f"الخدمة: {service}\n"
-            f"التاريخ: {date}\n"
+            f"رقم الهاتف: {phone}\n"
+            f"الخدمة: معاينة مجانية\n"
+            f"التاريخ: {converted_date}\n"
             f"الوقت: {time_str}\n"
-            "عنواننا: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين لطب وتجميل الأسنان"
+            "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين لطب وتجميل الأسنان"
         )
 
         return {
             "patient_name": patient_name,
-            "patient_phone": patient_phone,
-            "service": service,
-            "date": date,
+            "patient_phone": phone,
+            "service": "معاينة مجانية",
+            "date": converted_date,
             "time": time_str,
-            "ai_message": ai_message,
+            "ai_message": ai_message
         }
+
     except Exception:
-        # Fallback if GPT or JSON parsing fails
-        patient_name = name or "بدون اسم"
-        patient_phone = phone
-        service = "معاينة مجانية"
-        date = fallback_date
-        time_str = fallback_time
+        fallback_date = get_default_date()
+
         ai_message = (
-            f"تم تثبيت موعدك ❤\n"
-            f"الاسم: {patient_name}\n"
-            f"رقم الهاتف: {patient_phone}\n"
-            f"الخدمة: {service}\n"
-            f"التاريخ: {date}\n"
-            f"الوقت: {time_str}\n"
-            "عنواننا: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين لطب وتجميل الأسنان"
+            "تم تثبيت موعدك ❤\n"
+            f"الاسم: {name or 'بدون اسم'}\n"
+            f"رقم الهاتف: {phone}\n"
+            "الخدمة: معاينة مجانية\n"
+            f"التاريخ: {fallback_date}\n"
+            "الوقت: 16:00\n"
+            "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين لطب وتجميل الأسنان"
         )
+
         return {
-            "patient_name": patient_name,
-            "patient_phone": patient_phone,
-            "service": service,
-            "date": date,
-            "time": time_str,
-            "ai_message": ai_message,
+            "patient_name": name or "بدون اسم",
+            "patient_phone": phone,
+            "service": "معاينة مجانية",
+            "date": fallback_date,
+            "time": "16:00",
+            "ai_message": ai_message
         }
+
 
 # =======================================================
-# 📤 Save booking to Google Sheet (booking sheet)
+# 🧾 Save Booking to Google Sheets
 # =======================================================
 def save_booking_to_sheet(booking):
     try:
@@ -325,34 +249,35 @@ def save_booking_to_sheet(booking):
             "service": booking["service"],
             "date": booking["date"],
             "time": booking["time"],
-            "status": "Pending",
+            "status": "Pending"
         }
-        requests.post(BOOKING_API_URL, json=payload, timeout=10)
-    except Exception:
+        requests.post(BOOKING_API_URL, data=payload)
+    except:
         pass
 
+
 # =======================================================
-# 📩 Send booking confirmation to Messenger
+# 📩 Send Booking to Messenger
 # =======================================================
 def send_booking_confirmation(user_id, booking):
     send_message(user_id, booking["ai_message"])
 
+
 # =======================================================
-# 🤖 GPT Chat Engine — reply to last message only
+# 🤖 GPT Chat Engine (Reply to last msg)
 # =======================================================
 def ask_openai_chat(user_id, text):
     st = SESSIONS[user_id]
-    history_text = ""
-    if len(st["history"]) > 1:
-        history_text = " | ".join(st["history"][:-1])
+    history_text = " | ".join(st["history"][:-1]) if len(st["history"]) > 1 else ""
 
     big_prompt = """ 
 انت اسمك علي موظف الكول سنتر بعيادة كولدن لاين لطب الاسنان،
-وضيفتك ترد على الرسائل باللهجة العراقية، وبدون مبالغة وتجاوب على جميع استفساراتهم بطريقة تطمن المراجع
+وضيفتك ترد على الرسائل باللهجة العراقية  ، وبدون مبالغة وتجاوب على جميع استفساراتهم بطريقة تطمن المراجع
 
-نموذج الرد المقترح (جواب السؤال فقط من 2 الى 15 كلمة كحد اقصى) 
+نموذج الرد المقترح (جواب السؤال فقط من 2 الى 10 كلمات ) 
  
-ملاحظة ١ :- تأخذ بعين الاعتبار تاريخ المحادثة المرسل مع المحادثة وترد على أخير رسالة فقط.
+ملاحظة ١ :- تأخذ بعين الاعتبار تاريخ المحادثة المرسل مع المحادثة وترد على أخير رسالة فقط
+ .
 ملاحظة ٢ :- اذا المراجع عندة شكوة او عصبي او يشتكي من عمل العيادة ، تعتذر منه بطريقة مهذبة وتطلب منه الاسم ورقم التلفون حتى نتصل بيه واذا استمر بالتذمر ( مباشرة بلغة يتصل على رقم العيادة وتنيطه الرقم )
 
 وهاي بعض الملاحظات الي راح تستفاد منها عند الرد على المراجعين :-
@@ -363,26 +288,27 @@ def ask_openai_chat(user_id, text):
 العنوان : بغداد زيونة شارع الربيعي الخدمي داخل كراج مجمع اسطنبول 
 رقم الهاتف :- 07728802820
 
+
 الحشوة التجميلية جلسة وحدة
 حشوة الجذر من جلسة الى ثلاثة جلسات حسب التهاب السن
 تغليف الاسنان ( زاركون ، ايماكس ) خلال جلستين وبيناتهم من ٥ الى ٧ أيام
 ضمان العيادة جودة العمل مدى الحياة
-اذا كال المراجع ماكو تخفيضات ويطلب تخفيض للسعر تكول اله هاي أسعار عروض ، بس الطبيب ميقصر وياك ان شاء الله
+اذا كال المراجع ماكو تخفيضات  ويطلب تخفيض للسعر تكول اله هاي أسعار عروض ، بس الطبيب ميقصر وياك ان شاء الله
 حاول تفهم الاغلاط الاملائية وتصحيحها حسب صياغ الجملة
-تقوم بتحليل الطلب الخاص للمراجع مثل تقوم بجمع المبلغ الكلي للمراجع حسب عدد الاسنان الي يريدها بدون ذكر تفاصيل العملية الحسابية.
+تقوم بتحليل الطلب الخاص للمراجع مثل تقوم بجمع المبلغ الكلي للمراجع حسب عدد الاسنان الي يريدها بدون ذكر تفاصيل العملية الحسابية .... الخ 
 اذا سالك ان لازم حجز او راد يحجز تأخذ منه الاسم والرقم وبعدها تبلغه ان راح يتم التواصل وياه من قبل قسم المتابعة من العيادة لتحديد موعد الحجز
-لا تقم بالترحيب فقط عندما يقوم بالتحيب بك الأول
+لا تقم بالترحيب فقط عندما يقوم بالتحريب بك الأول
 اي نوع تغليف ( زاركون ، زاركون ايماكس ) يحتاج الى برد خفيف حتى متسبب مشاكل باللثة بالمستقبل
 اكو اغلاط املائية ومرادفات راح تصعب عليك الفهم مثل ( قبق ، غلاف ، تقبيق = تغليف ) ، ( طاح ، وكع ، انشلع = انقلع ) ، ( تحشاه ، تحشية = حشوة ) ، ( ما بيها مجال , هلا هلا بالفقير , على كيفكم ويانه , منين اجيب\نجيب\تجيب , نزل النه من السعر = المراجع يطلب تخفيض )، ( يوجعني ، توجع ، يموتني = الم )
 اذا كال منو الدكتور او اسم الدكتور كله احنة مركز وموجود اكثر من دكتور وكلهم اكفاء بالعمل , اذا كال دكتور لو دكتورة كول اكو دكتور واكو دكتورة
 
 قواعد الرد الذكية (مهم جداً):
 
-سياسة الإقناع: واربط السعر بـ (المواد الألمانية + الضمان الحقيقي). حسسه إنه ماخذ صفقة ممتازة.
+سياسة الإقناع:  واربط السعر بـ (المواد الألمانية + الضمان الحقيقي). حسسه إنه ماخذ صفقة ممتازة.
 
 الاسعار والعروض :-
 ( عرض تغليف الزاركون كل تغليفين الثالث مجاني )
-١: الزاركون 100 الف دينار كل اثنين الثالث مجاني
+١: الزاركون 100 الف دينار
 ٢: الزاركون ايماكس 150 الف دينار
 ٣: القلع 25 الف دينار
 ٤: الحشوة التجميلة 35 الف دينار
@@ -401,52 +327,45 @@ def ask_openai_chat(user_id, text):
 16: قلع سن العقل الجراحي ( السن المطمور ) سعره 75 الف دينار
 17: اذا سال موجود البنج الالكتروني اي متوفر البنج الالكتروني بالعيادة
 18: اذا سال شنو عروض الزاركون تجاوبة على سعر الزاركون ونفس الشي على كل خدمة
-19: لا تجاوب بصورة عشوائية اذا شي متعرف تجاوبة وماعندك سعر الخدمة المطلوبة بلغه هاي الخدمة نحدد سعرها بعد المعاينة المجانية
+19:لا تجاوب بصورة عشوائية اذا شي متعرف تجاوبة وماعندك سعر الخدمة المطلوبة بلغه هاي الخدمة نحدد سعرها بعد المعاينة المجانية
 20: سعر الفك المتحرك او التركيب المتحرك يكون 40 الف للسن الواحد ( لا تعطي اي معلومة تخص الفك المتحرك الى في حين السؤال المباشر عن التعويض المتحرك )
-21: اذا محدد نوع الخدمة دائما اعتبر الخدمة المباشرة هية خدمة الزاركون ( مثلا كال شكد سعر الفك الكامل = تغليف فك كال زاركون وتنطي السعر )
-22: انطي السعر بدون عملية حسابية دز الناتج النهائي
-23: اي معلومة ما فهمتها او ملكيت جواب الها ترسل اله رقم العيادة وتبلغة يتواصل عبر الواتساب لتفاصيل اكثر
+21:- اذا محدد نوع الخدمة دائما اعتبر الخدمة المباشرة هية خدمة الزاركون  ( مثلا كال شكد سعر الفك الكامل = تغليف فك كال زاركون وتنطي السعر )
+22:- انطي السعر بدون عملية حسابية دز الناتج النهائي
+23:- اي معلومة ما فهمتها او ملكيت جواب الها ترسل اله رقم العيادة وتبلغة يتواصل عبر الواتساب لتفاصيل اكثر
+
 """
 
-    restrain_history = """
-هذه الرسائل السابقة لفهم طريقة الكلام فقط.
-يجب أن ترد على آخر رسالة فقط.
-تجاهل جميع الرسائل السابقة حتى لو تحتوي أسئلة.
-"""
+    restrain_history = "تجاهل كل الرسائل السابقة ورد فقط على آخر رسالة."
 
     try:
-        messages = [
-            {"role": "system", "content": big_prompt},
-            {"role": "system", "content": restrain_history},
-            {"role": "system", "content": f"History:\n{history_text}"},
-            {"role": "user", "content": text},
-        ]
-
         rsp = client.chat.completions.create(
             model="gpt-4.1",
-            messages=messages,
-            max_tokens=300,
-            temperature=0.4,
+            messages=[
+                {"role": "system", "content": big_prompt},
+                {"role": "system", "content": restrain_history},
+                {"role": "system", "content": f"History:\n{history_text}"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=200
         )
-
         return rsp.choices[0].message.content.strip()
-    except Exception:
-        return "أعتذر صار خلل بسيط، كلّي شتحتاج أعيد أجاوبك من جديد ♥"
+    except:
+        return "صار خلل بسيط، كرر طلبك حبيبي ♥"
+
 
 # =======================================================
-# 📥 Add Message (Entry point for each user message)
+# 📥 Add User Message
 # =======================================================
 def add_user_message(user_id, text):
     global DAILY_MESSAGES
     DAILY_MESSAGES += 1
     now = time.time()
 
-    # Secret code to send instant report
     if text.strip() == "Faty2000":
         send_whatsapp_report()
         return
 
-    # New or expired session
+    # session creation
     if (
         user_id not in SESSIONS
         or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT)
@@ -456,86 +375,75 @@ def add_user_message(user_id, text):
             "name": "",
             "phone": "",
             "last_message_time": now,
-            "followup_sent": False,
+            "followup_sent": False
         }
 
     st = SESSIONS[user_id]
     st["history"].append(text)
     st["last_message_time"] = now
 
-    # launch follow-up checker snapshot
-    threading.Thread(target=follow_up_checker, args=(user_id, now), daemon=True).start()
+    extracted_name = extract_name(text)
+    if extracted_name:
+        st["name"] = extracted_name
 
-    # Try to update name heuristically
-    possible_name = extract_name(text)
-    if possible_name:
-        st["name"] = possible_name
-
-    # Detect phone → booking engine
     phone = extract_phone(text)
+
+    # If phone → booking mode
     if phone:
         st["phone"] = phone
+        last_msgs = get_last_messages(user_id)
 
-        last_msgs = get_last_messages(user_id, limit=10)
-        booking = analyze_booking(st.get("name", ""), phone, last_msgs)
+        booking = analyze_booking(st["name"], phone, last_msgs)
 
-        # confirm to user
         send_booking_confirmation(user_id, booking)
-
-        # save to sheet
         save_booking_to_sheet(booking)
 
-        # WhatsApp notification
         send_whatsapp_booking(
             booking["patient_name"],
             booking["patient_phone"],
             booking["date"],
-            booking["time"],
+            booking["time"]
         )
 
         st["followup_sent"] = True
         return
 
-    # No phone → normal chat reply with buffer
+    # Otherwise → chat mode
     threading.Thread(target=schedule_reply, args=(user_id,), daemon=True).start()
 
+
 # =======================================================
-# ✉️ Send Message to Messenger
+# ✉️ Send Message
 # =======================================================
 def send_message(receiver, text):
-    if not PAGE_ACCESS_TOKEN:
-        return
     url = "https://graph.facebook.com/v18.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": receiver}, "message": {"text": text}}
     requests.post(url, params=params, json=payload)
+
 
 # =======================================================
 # 📡 WEBHOOK
 # =======================================================
 @app.route("/webhook", methods=["GET"])
 def verify():
-    mode = request.args.get("hub.mode")
-    token = request.args.get("hub.verify_token")
-    challenge = request.args.get("hub.challenge")
-
-    if mode == "subscribe" and token == VERIFY_TOKEN:
-        return challenge, 200
-
+    if request.args.get("hub.verify_token") == VERIFY_TOKEN:
+        return request.args.get("hub.challenge")
     return "Error", 403
+
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json()
     for entry in data.get("entry", []):
         for ev in entry.get("messaging", []):
-            uid = ev["sender"]["id"]
             if "message" in ev and "text" in ev["message"]:
-                add_user_message(uid, ev["message"]["text"])
+                add_user_message(ev["sender"]["id"], ev["message"]["text"])
     return "OK", 200
 
+
 # =======================================================
-# 🚀 Run Server
+# 🚀 Run
 # =======================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
