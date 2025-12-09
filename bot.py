@@ -154,6 +154,12 @@ def get_last_messages(user_id, limit=10):
 # =======================================================
 # 🤖 Booking Engine
 # =======================================================
+def convert_to_12h(time_str):
+    try:
+        t = datetime.strptime(time_str, "%H:%M")
+        return t.strftime("%I:%M %p").lstrip("0")  # 4:00 PM
+    except:
+        return time_str
 def analyze_booking(name, phone, last_msgs):
     history = "\n".join(last_msgs)
 
@@ -168,7 +174,7 @@ def analyze_booking(name, phone, last_msgs):
  "patient_phone": "{phone}",
  "service": "معاينة مجانية",
  "day_name": "الخميس أو Thursday أو فارغة إذا لم يذكر يوم",
- "time": "HH:MM" (إذا لم يذكر وقت يكون 16:00)
+ "time": "HH:MM" (إذا لم يُذكر وقت يكون 16:00)
 }}
 
 ❗ لا تحسب التاريخ. فقط أرجع day_name.
@@ -191,6 +197,10 @@ def analyze_booking(name, phone, last_msgs):
         day_name = data.get("day_name", "").strip()
         time_str = data.get("time") or "16:00"
 
+        # 🔥 تحويل الوقت إلى صيغة 12 ساعة
+        time_12h = convert_to_12h(time_str)
+
+        # 🔥 حساب التاريخ
         if day_name:
             date = next_weekday_by_name(day_name)
             if not date:
@@ -198,14 +208,28 @@ def analyze_booking(name, phone, last_msgs):
         else:
             date = get_default_date()
 
-        # Message formatting
+        # 🔥 استخراج اسم اليوم بالعربي من التاريخ
+        day_name_ar = {
+            0: "الاثنين",
+            1: "الثلاثاء",
+            2: "الأربعاء",
+            3: "الخميس",
+            4: "الجمعة",
+            5: "السبت",
+            6: "الأحد"
+        }
+
+        day_index = datetime.strptime(date, "%Y-%m-%d").weekday()
+        day_label = day_name_ar[day_index]
+
+        # 🔥 صياغة الرسالة النهائية
         ai_msg = (
             "تم تثبيت موعدك ❤\n"
             f"الاسم: {patient_name}\n"
             f"رقم الهاتف: {phone}\n"
             f"الخدمة: معاينة مجانية\n"
-            f"التاريخ: {date}\n"
-            f"الوقت: {time_str}\n"
+            f"التاريخ: {date} ({day_label})\n"
+            f"الوقت: {time_12h}\n"
             "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين"
         )
 
@@ -220,20 +244,24 @@ def analyze_booking(name, phone, last_msgs):
 
     except:
         fallback_date = get_default_date()
+        fallback_time = "16:00"
+        fallback_time12 = convert_to_12h(fallback_time)
+
         return {
             "patient_name": name or "بدون اسم",
             "patient_phone": phone,
             "service": "معاينة مجانية",
             "date": fallback_date,
-            "time": "16:00",
+            "time": fallback_time,
             "ai_message":
                 f"تم تثبيت موعدك ❤\n"
                 f"الاسم: {name or 'بدون اسم'}\n"
                 f"رقم الهاتف: {phone}\n"
-                f"التاريخ: {fallback_date}\n"
-                f"الوقت: 16:00\n"
+                f"التاريخ: {fallback_date} ({day_name_ar[datetime.strptime(fallback_date, '%Y-%m-%d').weekday()]})\n"
+                f"الوقت: {fallback_time12}\n"
                 "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين"
         }
+
 
 
 # =======================================================
