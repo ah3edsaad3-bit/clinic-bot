@@ -23,7 +23,6 @@ WHATSAPP_URL = (
     "phone=9647818931201&apikey=8423339&text="
 )
 
-# Google Sheet API URL
 BOOKING_API_URL = "https://script.google.com/macros/s/AKfycbznSh6PeJodzuAqObqo9_kWIfgLoZHhrJ97C4pEXCXwD9JD4s3wZ9I93MRl0ot6d36-1g/exec"
 
 # =======================================================
@@ -39,6 +38,7 @@ DAILY_INCOMPLETE = 0
 SESSIONS = {}
 BUFFER_DELAY = 15
 MEMORY_TIMEOUT = 900
+
 
 # =======================================================
 # 🔥 AUTO CLEANER
@@ -60,6 +60,7 @@ threading.Thread(target=cleaner_daemon, daemon=True).start()
 def send_typing(receiver):
     if not PAGE_ACCESS_TOKEN:
         return
+
     url = "https://graph.facebook.com/v18.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": receiver}, "sender_action": "typing_on"}
@@ -67,35 +68,28 @@ def send_typing(receiver):
 
 
 # =======================================================
-# 🔢 Normalize Arabic Digits
+# 🔢 Utility Functions
 # =======================================================
 def normalize_numbers(text):
     arabic = "٠١٢٣٤٥٦٧٨٩"
     english = "0123456789"
-    table = str.maketrans(arabic, english)
-    return text.translate(table)
+    return text.translate(str.maketrans(arabic, english))
 
 
-# =======================================================
-# 🔢 Extract Phone
-# =======================================================
 def extract_phone(text):
     text = normalize_numbers(text)
     m = re.findall(r"07\d{9}", text)
     return m[0] if m else None
 
 
-# =======================================================
-# 🧾 Extract Name
-# =======================================================
 def extract_name(text):
-    txt = normalize_numbers(text)
-    cleaned = ''.join([c if not c.isdigit() else ' ' for c in txt])
+    t = normalize_numbers(text)
+    cleaned = ''.join([c if not c.isdigit() else ' ' for c in t])
     return cleaned.strip() if len(cleaned.strip()) > 1 else None
 
 
 # =======================================================
-# 📅 Convert Day Name → Actual Full Date
+# 📅 Next weekday name → date
 # =======================================================
 def next_weekday_by_name(day_name):
     days = {
@@ -111,7 +105,6 @@ def next_weekday_by_name(day_name):
 
     target = days[dn]
     today = datetime.now()
-
     diff = target - today.weekday()
     if diff <= 0:
         diff += 7
@@ -121,49 +114,64 @@ def next_weekday_by_name(day_name):
 
 
 # =======================================================
-# 📅 Default Appointment Date (Tomorrow except Friday)
+# 📅 Default date = tomorrow unless Friday → Saturday
 # =======================================================
 def get_default_date():
     today = datetime.now()
-    tomorrow = today + timedelta(days=1)
+    d = today + timedelta(days=1)
 
-    if tomorrow.weekday() == 4:  # Friday
-        tomorrow = tomorrow + timedelta(days=1)
+    if d.weekday() == 4:  # Friday
+        d += timedelta(days=1)
 
-    return tomorrow.strftime("%Y-%m-%d")
+    return d.strftime("%Y-%m-%d")
 
 
 # =======================================================
-# 📥 Get last 10 messages
+# 🧠 Chat Delay Reply
+# =======================================================
+def schedule_reply(user_id):
+    time.sleep(BUFFER_DELAY)
+    st = SESSIONS.get(user_id)
+    if not st:
+        return
+
+    now = time.time()
+    if now - st["last_message_time"] >= BUFFER_DELAY:
+        send_typing(user_id)
+        last_msg = st["history"][-1]
+        reply = ask_openai_chat(user_id, last_msg)
+        if reply:
+            send_message(user_id, reply)
+
+
+# =======================================================
+# 📥 Last Messages
 # =======================================================
 def get_last_messages(user_id, limit=10):
-    st = SESSIONS.get(user_id, {})
-    return st.get("history", [])[-limit:]
+    return SESSIONS.get(user_id, {}).get("history", [])[-limit:]
 
 
 # =======================================================
-# 🤖 GPT Booking Engine (separate)
+# 🤖 Booking Engine
 # =======================================================
 def analyze_booking(name, phone, last_msgs):
-    history_snippet = "\n".join(last_msgs)
+    history = "\n".join(last_msgs)
 
     prompt = f"""
-اقرأ محادثة المراجع وحدد الموعد.
+اقرأ آخر رسائل المراجع وحدد تفاصيل الموعد بدون حساب التاريخ.
+المخرجات يجب أن تكون JSON فقط.
 
-لا تحسب التاريخ بنفسك.
-إذا ذكر يوم مثل "الخميس" أو "السبت الجاي" → فقط رجّع "day_name" = اسم اليوم.
-
-الصيغـة المطلوبة بالإخراج:
+مثال الإخراج:
 
 {{
- "patient_name": "اسم المراجع المستخرج إن وجد، أو الاسم الموجود",
+ "patient_name": "الاسم",
  "patient_phone": "{phone}",
  "service": "معاينة مجانية",
- "day_name": "Thursday أو السبت أو فاضي إذا ما مذكور",
- "time": "HH:MM"  (إذا ما مذكور → 16:00)
+ "day_name": "الخميس أو Thursday أو فارغة إذا لم يذكر يوم",
+ "time": "HH:MM" (إذا لم يذكر وقت يكون 16:00)
 }}
 
-لا تُرجع أي شيء آخر غير JSON فقط.
+❗ لا تحسب التاريخ. فقط أرجع day_name.
 """
 
     try:
@@ -171,106 +179,102 @@ def analyze_booking(name, phone, last_msgs):
             model="gpt-4.1",
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": history_snippet}
+                {"role": "user", "content": history}
             ],
-            max_tokens=300,
+            max_tokens=250,
             temperature=0
         )
 
         data = json.loads(rsp.choices[0].message.content)
 
-        # استخراج الاسم الصحيح
         patient_name = data.get("patient_name") or name or "بدون اسم"
-
-        # استخراج اليوم
         day_name = data.get("day_name", "").strip()
-
-        # تحويل اليوم → تاريخ كامل
-        if day_name:
-            converted_date = next_weekday_by_name(day_name)
-        else:
-            converted_date = get_default_date()
-
-        # الوقت
         time_str = data.get("time") or "16:00"
 
-        # صياغة رسالة جميلة
-        ai_message = (
+        if day_name:
+            date = next_weekday_by_name(day_name)
+            if not date:
+                date = get_default_date()
+        else:
+            date = get_default_date()
+
+        # Message formatting
+        ai_msg = (
             "تم تثبيت موعدك ❤\n"
             f"الاسم: {patient_name}\n"
             f"رقم الهاتف: {phone}\n"
             f"الخدمة: معاينة مجانية\n"
-            f"التاريخ: {converted_date}\n"
+            f"التاريخ: {date}\n"
             f"الوقت: {time_str}\n"
-            "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين لطب وتجميل الأسنان"
+            "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين"
         )
 
         return {
             "patient_name": patient_name,
             "patient_phone": phone,
             "service": "معاينة مجانية",
-            "date": converted_date,
+            "date": date,
             "time": time_str,
-            "ai_message": ai_message
+            "ai_message": ai_msg
         }
 
-    except Exception:
+    except:
         fallback_date = get_default_date()
-
-        ai_message = (
-            "تم تثبيت موعدك ❤\n"
-            f"الاسم: {name or 'بدون اسم'}\n"
-            f"رقم الهاتف: {phone}\n"
-            "الخدمة: معاينة مجانية\n"
-            f"التاريخ: {fallback_date}\n"
-            "الوقت: 16:00\n"
-            "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين لطب وتجميل الأسنان"
-        )
-
         return {
             "patient_name": name or "بدون اسم",
             "patient_phone": phone,
             "service": "معاينة مجانية",
             "date": fallback_date,
             "time": "16:00",
-            "ai_message": ai_message
+            "ai_message":
+                f"تم تثبيت موعدك ❤\n"
+                f"الاسم: {name or 'بدون اسم'}\n"
+                f"رقم الهاتف: {phone}\n"
+                f"التاريخ: {fallback_date}\n"
+                f"الوقت: 16:00\n"
+                "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين"
         }
 
 
 # =======================================================
-# 🧾 Save Booking to Google Sheets
+# 🧾 Save Booking into Sheet
 # =======================================================
-def save_booking_to_sheet(booking):
-    try:
-        payload = {
-            "action": "addBooking",
-            "name": booking["patient_name"],
-            "phone": booking["patient_phone"],
-            "service": booking["service"],
-            "date": booking["date"],
-            "time": booking["time"],
-            "status": "Pending"
-        }
-        requests.post(BOOKING_API_URL, data=payload)
-    except:
-        pass
+def save_booking_to_sheet(b):
+    payload = {
+        "action": "addBooking",
+        "name": b["patient_name"],
+        "phone": b["patient_phone"],
+        "service": b["service"],
+        "date": b["date"],
+        "time": b["time"],
+        "status": "Pending"
+    }
+    requests.post(BOOKING_API_URL, data=payload)
 
 
 # =======================================================
-# 📩 Send Booking to Messenger
+# 📤 WhatsApp Booking Notification
 # =======================================================
-def send_booking_confirmation(user_id, booking):
-    send_message(user_id, booking["ai_message"])
+def send_whatsapp_booking(name, phone, date, time_):
+    msg = (
+        "حجز جديد:\n"
+        f"الاسم: {name}\n"
+        f"الرقم: {phone}\n"
+        f"التاريخ: {date}\n"
+        f"الوقت: {time_}"
+    )
+    url = WHATSAPP_URL + requests.utils.quote(msg)
+    requests.get(url)
 
 
 # =======================================================
-# 🤖 GPT Chat Engine (Reply to last msg)
+# 🤖 Chat Engine (Ali)
 # =======================================================
 def ask_openai_chat(user_id, text):
     st = SESSIONS[user_id]
     history_text = " | ".join(st["history"][:-1]) if len(st["history"]) > 1 else ""
 
-    big_prompt = """ 
+    prompt = """ 
 انت اسمك علي موظف الكول سنتر بعيادة كولدن لاين لطب الاسنان،
 وضيفتك ترد على الرسائل باللهجة العراقية  ، وبدون مبالغة وتجاوب على جميع استفساراتهم بطريقة تطمن المراجع
 
@@ -335,26 +339,25 @@ def ask_openai_chat(user_id, text):
 
 """
 
-    restrain_history = "تجاهل كل الرسائل السابقة ورد فقط على آخر رسالة."
-
     try:
         rsp = client.chat.completions.create(
             model="gpt-4.1",
             messages=[
-                {"role": "system", "content": big_prompt},
-                {"role": "system", "content": restrain_history},
-                {"role": "system", "content": f"History:\n{history_text}"},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": text}
             ],
-            max_tokens=200
+            max_tokens=250,
+            temperature=0.4
         )
+
         return rsp.choices[0].message.content.strip()
+
     except:
-        return "صار خلل بسيط، كرر طلبك حبيبي ♥"
+        return "صار خلل بسيط، عاود رسالتك ♥"
 
 
 # =======================================================
-# 📥 Add User Message
+# 📥 Core Handler
 # =======================================================
 def add_user_message(user_id, text):
     global DAILY_MESSAGES
@@ -362,10 +365,8 @@ def add_user_message(user_id, text):
     now = time.time()
 
     if text.strip() == "Faty2000":
-        send_whatsapp_report()
         return
 
-    # session creation
     if (
         user_id not in SESSIONS
         or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT)
@@ -382,33 +383,27 @@ def add_user_message(user_id, text):
     st["history"].append(text)
     st["last_message_time"] = now
 
-    extracted_name = extract_name(text)
-    if extracted_name:
-        st["name"] = extracted_name
+    # Extract name
+    n = extract_name(text)
+    if n:
+        st["name"] = n
 
+    # Detect phone → booking mode
     phone = extract_phone(text)
-
-    # If phone → booking mode
     if phone:
         st["phone"] = phone
-        last_msgs = get_last_messages(user_id)
+        msgs = get_last_messages(user_id)
+        booking = analyze_booking(st["name"], phone, msgs)
 
-        booking = analyze_booking(st["name"], phone, last_msgs)
-
-        send_booking_confirmation(user_id, booking)
+        send_message(user_id, booking["ai_message"])
         save_booking_to_sheet(booking)
-
         send_whatsapp_booking(
-            booking["patient_name"],
-            booking["patient_phone"],
-            booking["date"],
-            booking["time"]
+            booking["patient_name"], booking["patient_phone"],
+            booking["date"], booking["time"]
         )
-
-        st["followup_sent"] = True
         return
 
-    # Otherwise → chat mode
+    # otherwise → chat engine
     threading.Thread(target=schedule_reply, args=(user_id,), daemon=True).start()
 
 
@@ -416,8 +411,8 @@ def add_user_message(user_id, text):
 # ✉️ Send Message
 # =======================================================
 def send_message(receiver, text):
-    url = "https://graph.facebook.com/v18.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
+    url = "https://graph.facebook.com/v18.0/me/messages"
     payload = {"recipient": {"id": receiver}, "message": {"text": text}}
     requests.post(url, params=params, json=payload)
 
@@ -443,7 +438,7 @@ def webhook():
 
 
 # =======================================================
-# 🚀 Run
+# RUN
 # =======================================================
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
