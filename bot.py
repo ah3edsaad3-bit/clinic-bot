@@ -157,7 +157,7 @@ def get_last_messages(user_id, limit=10):
 def convert_to_12h(time_str):
     try:
         t = datetime.strptime(time_str, "%H:%M")
-        return t.strftime("%I:%M %p").lstrip("0")  # 4:00 PM
+        return t.strftime("%I:%M").lstrip("0")  # مثال → 4:00
     except:
         return time_str
 def analyze_booking(name, phone, last_msgs):
@@ -197,7 +197,7 @@ def analyze_booking(name, phone, last_msgs):
         day_name = data.get("day_name", "").strip()
         time_str = data.get("time") or "16:00"
 
-        # 🔥 تحويل الوقت إلى صيغة 12 ساعة
+        # 🔥 تحويل الوقت إلى صيغة 12 ساعة بدون AM/PM
         time_12h = convert_to_12h(time_str)
 
         # 🔥 حساب التاريخ
@@ -208,7 +208,7 @@ def analyze_booking(name, phone, last_msgs):
         else:
             date = get_default_date()
 
-        # 🔥 استخراج اسم اليوم بالعربي من التاريخ
+        # 🔥 استخراج اسم اليوم بالعربي
         day_name_ar = {
             0: "الاثنين",
             1: "الثلاثاء",
