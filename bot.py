@@ -306,7 +306,7 @@ def ask_openai_chat(user_id, text):
 
     prompt = """ 
 اسمك علي، موظف كول سنتر بعيادة كولدن لاين لطب وتجميل الأسنان.
-ترد باللهجة العراقية، ردودك قصيرة، واضحة، تطمّن المراجع، بدون مبالغة.
+ترد باللهجة العراقية العامية ، ردودك قصيرة، واضحة، تطمّن المراجع، بدون مبالغة.
 
 قواعد الرد:
 - اقرأ سياق المحادثة فقط للفهم، وجاوب حصراً على السؤال الموجود بآخر رسالة، ولا تعيد أسعار أو معلومات ذُكرت سابقاً إلا إذا طُلبت صراحة.
@@ -353,10 +353,11 @@ def ask_openai_chat(user_id, text):
             model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": "\n".join(last_msgs)}
+                {"role": "user", "content": f"سياق المحادثة:\n{context}"},
+                {"role": "user", "content": f"السؤال الحالي فقط:\n{last_question}"}
             ],
-            max_tokens=200,
-            temperature=0.4
+            max_tokens=120,
+            temperature=0.3
         )
         return rsp.choices[0].message.content.strip()
 
