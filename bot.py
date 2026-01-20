@@ -300,14 +300,16 @@ def send_whatsapp_booking(name, phone, date, time_):
 # =======================================================
 def ask_openai_chat(user_id, text):
     st = SESSIONS[user_id]
-    history_text = " | ".join(st["history"][:-1]) if len(st["history"]) > 1 else ""
+
+    # آخر 5 رسائل من المحادثة
+    last_msgs = st["history"][-5:]
 
     prompt = """ 
 اسمك علي، موظف كول سنتر بعيادة كولدن لاين لطب وتجميل الأسنان.
 ترد باللهجة العراقية، ردودك قصيرة، واضحة، تطمّن المراجع، بدون مبالغة.
 
 قواعد الرد:
-- جاوب على آخر رسالة فقط.
+- اقرأ آخر رسائل المحادثة وركّز على آخر رسالة بالرد
 - لا ترحب إلا إذا المراجع رحّب.
 - الرد من 5 إلى 25 كلمة حسب الحاجة.
 - إذا ما عندك معلومة دقيقة: كُل "نحددها بعد المعاينة المجانية".
@@ -348,15 +350,14 @@ def ask_openai_chat(user_id, text):
 
     try:
         rsp = client.chat.completions.create(
-            model="gpt-4.1",
+            model="gpt-4o-mini",
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": text}
+                {"role": "user", "content": "\n".join(last_msgs)}
             ],
-            max_tokens=250,
+            max_tokens=200,
             temperature=0.4
         )
-
         return rsp.choices[0].message.content.strip()
 
     except:
