@@ -301,8 +301,12 @@ def send_whatsapp_booking(name, phone, date, time_):
 def ask_openai_chat(user_id, text):
     st = SESSIONS[user_id]
 
-    # آخر 5 رسائل من المحادثة
+    # آخر 5 رسائل
     last_msgs = st["history"][-5:]
+
+    # فصل السياق عن السؤال الحالي
+    context = "\n".join(last_msgs[:-1])
+    last_question = last_msgs[-1]
 
     prompt = """ 
 اسمك علي، موظف كول سنتر بعيادة كولدن لاين لطب وتجميل الأسنان.
