@@ -359,6 +359,7 @@ def ask_openai_chat(user_id, text):
 
 (عروض الزراعة للفك الواحد مليون وربع للفكين مليونين ونص )
 
+اذا العميل كال ( مثال , عندي سنين زراعة و 8 تغليفات , تجمع اله سعر زرعتين 500 والتغليف 600 وهكذا ) 
 
 ملاحظات:
 - التغليف يحتاج برد خفيف.
@@ -405,18 +406,32 @@ def add_user_message(user_id, text):
 
     # كشف رقم الهاتف -> بدء عملية الحجز
     phone = extract_phone(text)
-    if phone:
-        msgs = get_last_messages(user_id)
-        # نرسل فقط الرقم والتاريخ لـ GPT وهو يستخرج الاسم من الـ msgs
-        booking = analyze_booking(phone, msgs)
+name = extract_name(text)
+day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
 
-        send_message(user_id, booking["ai_message"])
-        save_booking_to_sheet(booking)
-        send_whatsapp_booking(
-            booking["patient_name"], booking["patient_phone"],
-            booking["date"], booking["time"]
-        )
-        return
+# ✅ إذا داز رقم + اسم أو يوم → ثبت مباشرة
+if phone and (name or day):
+    msgs = get_last_messages(user_id)
+    booking = analyze_booking(phone, msgs)
+
+    send_message(user_id, booking["ai_message"])
+    save_booking_to_sheet(booking)
+    send_whatsapp_booking(
+        booking["patient_name"], booking["patient_phone"],
+        booking["date"], booking["time"]
+    )
+    return
+
+# 🟡 إذا داز رقم بس → اسأله وبس
+if phone:
+    st["temp_phone"] = phone
+    st["booking_step"] = "waiting_details"
+    send_message(
+        user_id,
+        "تمام 🌹 وصلنا رقمك، تحب أي يوم يناسبك للحجز؟ واسم المراجع شنو؟"
+    )
+    return
+
 
     # إذا لم يوجد رقم هاتف، يستمر "علي" بالدردشة الطبيعية
     threading.Thread(target=schedule_reply, args=(user_id,), daemon=True).start()
@@ -456,7 +471,7 @@ def webhook():
             if "message" in ev and "text" in ev["message"]:
                 add_user_message(user_id, ev["message"]["text"])
             elif "message" in ev and "attachments" in ev["message"]:
-                send_message(user_id, "عاشت ايدك، وصلت الصورة/البصمة للدكتور. راح نطلع عليها ونطيك التفاصيل بالمعاينة المجانية إن شاء الله 🌹")
+                send_message(user_id, "عاشت ايدك، وصلت الصورة وراح ندزها للدكتور. راح يطلع عليها ونطيك التفاصيل باقرب وقت إن شاء الله 🌹")
     return "OK", 200
 
 if __name__ == "__main__":
