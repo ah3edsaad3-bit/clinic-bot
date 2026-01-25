@@ -158,8 +158,19 @@ def convert_to_12h(time_str):
         return t.strftime("%I:%M").lstrip("0")  # مثال → 4:00
     except:
         return time_str
-def analyze_booking(phone, last_msgs):
+def analyze_booking(phone, last_msgs, forced_date=None):
     history = "\n".join(last_msgs)
+
+    day_name_ar = {
+        0: "الاثنين",
+        1: "الثلاثاء",
+        2: "الأربعاء",
+        3: "الخميس",
+        4: "الجمعة",
+        5: "السبت",
+        6: "الأحد"
+    }
+
 
     prompt = f"""
 اقرأ المحادثة بتركيز واستخرج معلومات الموعد.
@@ -204,23 +215,14 @@ def analyze_booking(phone, last_msgs):
         time_12h = convert_to_12h(time_str)
 
         # 🔥 حساب التاريخ
-        if day_name:
-            date = next_weekday_by_name(day_name)
-            if not date:
-                date = get_default_date()
+        # 🔥 حساب التاريخ (الأولوية للتاريخ الجاهز)
+        if forced_date:
+            date = forced_date
+        elif day_name:
+            date = next_weekday_by_name(day_name) or get_default_date()
         else:
             date = get_default_date()
 
-        # 🔥 استخراج اسم اليوم بالعربي
-        day_name_ar = {
-            0: "الاثنين",
-            1: "الثلاثاء",
-            2: "الأربعاء",
-            3: "الخميس",
-            4: "الجمعة",
-            5: "السبت",
-            6: "الأحد"
-        }
 
         day_index = datetime.strptime(date, "%Y-%m-%d").weekday()
         day_label = day_name_ar[day_index]
@@ -258,7 +260,7 @@ def analyze_booking(phone, last_msgs):
             "time": fallback_time,
             "ai_message":
                 f"تم تثبيت موعدك ❤\n"
-                f"الاسم: {name or 'بدون اسم'}\n"
+                f"الاسم: بدون اسم\n"
                 f"رقم الهاتف: {phone}\n"
                 f"التاريخ: {fallback_date} ({day_name_ar[datetime.strptime(fallback_date, '%Y-%m-%d').weekday()]})\n"
                 f"الوقت: {fallback_time12}\n"
@@ -388,6 +390,22 @@ def ask_openai_chat(user_id, text):
 # =======================================================
 # 📥 Core Handler
 # =======================================================
+def extract_relative_day(text):
+    t = normalize_numbers(text)
+
+    today = datetime.now()
+
+    if "اليوم" in t:
+        return today.strftime("%Y-%m-%d")
+
+    if "باجر" in t:
+        return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if "ورا باچر" in t or "بعد باچر" in t:
+        return (today + timedelta(days=2)).strftime("%Y-%m-%d")
+
+    return None
+
 def add_user_message(user_id, text):
     now = time.time()
 
@@ -407,7 +425,8 @@ def add_user_message(user_id, text):
 
     phone = extract_phone(text)
     name = extract_name(text)
-    day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
+    explicit_day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
+    relative_day = extract_relative_day(text)
 
     # 🟢 مرحلة انتظار التفاصيل
     if st["booking_step"] == "waiting_details":
@@ -415,13 +434,21 @@ def add_user_message(user_id, text):
         if name:
             st["temp_name"] = name
 
-        if day:
+        if explicit_day:
             st["temp_day"] = text
+
+        if relative_day:
+            st["temp_day"] = relative_day
 
         # ✅ إذا اكتملت كل المعلومات
         if st["temp_phone"] and st["temp_name"] and st["temp_day"]:
             msgs = get_last_messages(user_id)
-            booking = analyze_booking(st["temp_phone"], msgs)
+            booking = analyze_booking(
+    st["temp_phone"],
+    msgs,
+    forced_date=st["temp_day"] if st["temp_day"] and "-" in st["temp_day"] else None
+)
+
 
             send_message(user_id, booking["ai_message"])
             save_booking_to_sheet(booking)
@@ -438,16 +465,27 @@ def add_user_message(user_id, text):
             st["temp_day"] = None
             return
 
+        missing = []
+        if not st["temp_name"]:
+            missing.append("الاسم")
+        if not st["temp_day"]:
+            missing.append("اليوم")
+
         send_message(
             user_id,
-            "تمام 🌹 بعد نحتاج الاسم واليوم حتى نثبت الحجز"
+            f"تمام 🌹 بعد نحتاج {' و '.join(missing)} حتى نثبت الحجز"
         )
         return
 
     # ✅ معلومات كاملة من أول رسالة
-    if phone and (name and day):
+    if phone and name and (explicit_day or relative_day):
         msgs = get_last_messages(user_id)
-        booking = analyze_booking(phone, msgs)
+        booking = analyze_booking(
+    phone,
+    msgs,
+    forced_date=relative_day if relative_day else None
+)
+
 
         send_message(user_id, booking["ai_message"])
         save_booking_to_sheet(booking)
