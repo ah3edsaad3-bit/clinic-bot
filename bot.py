@@ -251,7 +251,7 @@ def analyze_booking(phone, last_msgs):
         fallback_time12 = convert_to_12h(fallback_time)
 
         return {
-            "patient_name": name or "بدون اسم",
+            "patient_name": "بدون اسم",
             "patient_phone": phone,
             "service": "معاينة مجانية",
             "date": fallback_date,
