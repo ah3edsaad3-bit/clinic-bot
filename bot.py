@@ -390,51 +390,55 @@ def ask_openai_chat(user_id, text):
 # =======================================================
 def add_user_message(user_id, text):
     now = time.time()
-    
-    # تأكد من تعريف DAILY_MESSAGES في بداية الملف لتجنب الخطأ
-    # global DAILY_MESSAGES 
 
     if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT):
         SESSIONS[user_id] = {
             "history": [],
             "last_message_time": now,
+            "booking_step": None,
+            "temp_phone": None,
         }
 
     st = SESSIONS[user_id]
     st["history"].append(text)
     st["last_message_time"] = now
 
-    # كشف رقم الهاتف -> بدء عملية الحجز
     phone = extract_phone(text)
-name = extract_name(text)
-day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
+    name = extract_name(text)
+    day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
 
-# ✅ إذا داز رقم + اسم أو يوم → ثبت مباشرة
-if phone and (name or day):
-    msgs = get_last_messages(user_id)
-    booking = analyze_booking(phone, msgs)
+    # ✅ إذا داز رقم + اسم أو يوم → ثبت مباشرة
+    if phone and (name or day):
+        msgs = get_last_messages(user_id)
+        booking = analyze_booking(phone, msgs)
 
-    send_message(user_id, booking["ai_message"])
-    save_booking_to_sheet(booking)
-    send_whatsapp_booking(
-        booking["patient_name"], booking["patient_phone"],
-        booking["date"], booking["time"]
-    )
-    return
+        send_message(user_id, booking["ai_message"])
+        save_booking_to_sheet(booking)
+        send_whatsapp_booking(
+            booking["patient_name"],
+            booking["patient_phone"],
+            booking["date"],
+            booking["time"]
+        )
+        return
 
-# 🟡 إذا داز رقم بس → اسأله وبس
-if phone:
-    st["temp_phone"] = phone
-    st["booking_step"] = "waiting_details"
-    send_message(
-        user_id,
-        "تمام 🌹 وصلنا رقمك، تحب أي يوم يناسبك للحجز؟ واسم المراجع شنو؟"
-    )
-    return
+    # 🟡 إذا داز رقم بس → اسأله وبس
+    if phone:
+        st["temp_phone"] = phone
+        st["booking_step"] = "waiting_details"
+        send_message(
+            user_id,
+            "تمام 🌹 وصلنا رقمك، تحب أي يوم يناسبك للحجز؟ واسم المراجع شنو؟"
+        )
+        return
 
+    # 🔵 إذا ماكو رقم → دردشة طبيعية
+    threading.Thread(
+        target=schedule_reply,
+        args=(user_id,),
+        daemon=True
+    ).start()
 
-    # إذا لم يوجد رقم هاتف، يستمر "علي" بالدردشة الطبيعية
-    threading.Thread(target=schedule_reply, args=(user_id,), daemon=True).start()
 
 
 # =======================================================
