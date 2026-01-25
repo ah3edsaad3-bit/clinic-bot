@@ -84,6 +84,37 @@ def extract_name(text):
     t = normalize_numbers(text)
     cleaned = ''.join([c if not c.isdigit() else ' ' for c in t])
     return cleaned.strip() if len(cleaned.strip()) > 1 else None
+# =======================================================
+# 📅 Day Keywords (حتى تنشال من الاسم)
+# =======================================================
+DAY_WORDS = [
+    "اليوم",
+    "باجر",
+    "عكب",
+    "عكب باجر",
+    "ورا",
+    "ورا باچر",
+    "بعد",
+    "بعد باچر",
+    "الاثنين",
+    "الثلاثاء",
+    "الأربعاء",
+    "الخميس",
+    "السبت",
+    "الأحد"
+]
+def clean_name_from_day_words(name):
+    if not name:
+        return name
+
+    parts = name.split()
+    cleaned = []
+
+    for p in parts:
+        if p not in DAY_WORDS:
+            cleaned.append(p)
+
+    return " ".join(cleaned).strip() if cleaned else None
 
 
 # =======================================================
@@ -392,19 +423,19 @@ def ask_openai_chat(user_id, text):
 # =======================================================
 def extract_relative_day(text):
     t = normalize_numbers(text)
-
     today = datetime.now()
 
     if "اليوم" in t:
         return today.strftime("%Y-%m-%d")
 
-    if "باجر" in t:
+    if "باجر" in t and not ("عكب" in t or "ورا" in t or "بعد" in t):
         return (today + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    if "ورا باچر" in t or "بعد باچر" in t:
+    if "ورا باچر" in t or "بعد باچر" in t or "عكب باجر" in t:
         return (today + timedelta(days=2)).strftime("%Y-%m-%d")
 
     return None
+
 
 def add_user_message(user_id, text):
     now = time.time()
@@ -417,6 +448,7 @@ def add_user_message(user_id, text):
             "temp_phone": None,
             "temp_name": None,
             "temp_day": None,
+            "pending_booking": None,
         }
 
     st = SESSIONS[user_id]
@@ -424,31 +456,15 @@ def add_user_message(user_id, text):
     st["last_message_time"] = now
 
     phone = extract_phone(text)
-    name = extract_name(text)
+    raw_name = extract_name(text)
+    name = clean_name_from_day_words(raw_name)
     explicit_day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
     relative_day = extract_relative_day(text)
 
-    # 🟢 مرحلة انتظار التفاصيل
-    if st["booking_step"] == "waiting_details":
-
-        if name:
-            st["temp_name"] = name
-
-        if explicit_day:
-            st["temp_day"] = text
-
-        if relative_day:
-            st["temp_day"] = relative_day
-
-        # ✅ إذا اكتملت كل المعلومات
-        if st["temp_phone"] and st["temp_name"] and st["temp_day"]:
-            msgs = get_last_messages(user_id)
-            booking = analyze_booking(
-    st["temp_phone"],
-    msgs,
-    forced_date=st["temp_day"] if st["temp_day"] and "-" in st["temp_day"] else None
-)
-
+    # 🟡 مرحلة تأكيد الحجز
+    if st["booking_step"] == "waiting_confirmation":
+        if any(k in text for k in ["تأكيد", "اوكي", "تمام", "اي", "ثبت", "موافق"]):
+            booking = st["pending_booking"]
 
             send_message(user_id, booking["ai_message"])
             save_booking_to_sheet(booking)
@@ -460,9 +476,44 @@ def add_user_message(user_id, text):
             )
 
             st["booking_step"] = None
-            st["temp_phone"] = None
-            st["temp_name"] = None
-            st["temp_day"] = None
+            st["pending_booking"] = None
+        else:
+            send_message(user_id, "إذا تحب نغيّر اليوم أو الاسم، گلي 🌹")
+        return
+
+    # 🟢 مرحلة انتظار التفاصيل
+    if st["booking_step"] == "waiting_details":
+
+        if phone:
+            st["temp_phone"] = phone
+        if name:
+            st["temp_name"] = name
+        if explicit_day:
+            st["temp_day"] = text
+        if relative_day:
+            st["temp_day"] = relative_day
+
+        if st["temp_phone"] and st["temp_name"] and st["temp_day"]:
+            msgs = get_last_messages(user_id)
+            booking = analyze_booking(
+                st["temp_phone"],
+                msgs,
+                forced_date=st["temp_day"] if "-" in st["temp_day"] else None
+            )
+
+            st["pending_booking"] = booking
+            st["booking_step"] = "waiting_confirmation"
+
+            send_message(
+                user_id,
+                f"""تمام 🌹
+راح نثبت الحجز بهالتفاصيل:
+الاسم: {booking['patient_name']}
+اليوم: {booking['date']}
+الوقت: 4 العصر
+
+اكتب (تأكيد) حتى نثبت الموعد 🌹"""
+            )
             return
 
         missing = []
@@ -471,29 +522,30 @@ def add_user_message(user_id, text):
         if not st["temp_day"]:
             missing.append("اليوم")
 
-        send_message(
-            user_id,
-            f"تمام 🌹 بعد نحتاج {' و '.join(missing)} حتى نثبت الحجز"
-        )
+        send_message(user_id, f"تمام 🌹 بعد نحتاج {' و '.join(missing)}")
         return
 
     # ✅ معلومات كاملة من أول رسالة
     if phone and name and (explicit_day or relative_day):
         msgs = get_last_messages(user_id)
         booking = analyze_booking(
-    phone,
-    msgs,
-    forced_date=relative_day if relative_day else None
-)
+            phone,
+            msgs,
+            forced_date=relative_day if relative_day else None
+        )
 
+        st["pending_booking"] = booking
+        st["booking_step"] = "waiting_confirmation"
 
-        send_message(user_id, booking["ai_message"])
-        save_booking_to_sheet(booking)
-        send_whatsapp_booking(
-            booking["patient_name"],
-            booking["patient_phone"],
-            booking["date"],
-            booking["time"]
+        send_message(
+            user_id,
+            f"""تمام 🌹
+راح نثبت الحجز بهالتفاصيل:
+الاسم: {booking['patient_name']}
+اليوم: {booking['date']}
+الوقت: 4 العصر
+
+اكتب (تأكيد) حتى نثبت الموعد 🌹"""
         )
         return
 
@@ -501,10 +553,7 @@ def add_user_message(user_id, text):
     if phone:
         st["temp_phone"] = phone
         st["booking_step"] = "waiting_details"
-        send_message(
-            user_id,
-            "تمام 🌹 وصلنا رقمك، شنو اسم المراجع؟ وأي يوم يناسبك للحجز؟"
-        )
+        send_message(user_id, "تمام 🌹 شنو اسم المراجع؟ وأي يوم يناسبك للحجز؟")
         return
 
     # 🔵 دردشة عادية
@@ -513,6 +562,7 @@ def add_user_message(user_id, text):
         args=(user_id,),
         daemon=True
     ).start()
+
 
 
 
