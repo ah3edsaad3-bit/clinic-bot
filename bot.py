@@ -406,7 +406,25 @@ def add_user_message(user_id, text):
     phone = extract_phone(text)
     name = extract_name(text)
     day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
+    # 🟢 حالة: كان داز رقم سابق وكمل الاسم/اليوم
+if st.get("booking_step") == "waiting_details" and (name or day):
+    phone = st.get("temp_phone")
+    msgs = get_last_messages(user_id)
+    booking = analyze_booking(phone, msgs)
 
+    send_message(user_id, booking["ai_message"])
+    save_booking_to_sheet(booking)
+    send_whatsapp_booking(
+        booking["patient_name"],
+        booking["patient_phone"],
+        booking["date"],
+        booking["time"]
+    )
+
+    st["booking_step"] = None
+    st["temp_phone"] = None
+    return
+    
     # ✅ إذا داز رقم + اسم أو يوم → ثبت مباشرة
     if phone and (name or day):
         msgs = get_last_messages(user_id)
