@@ -397,6 +397,8 @@ def add_user_message(user_id, text):
             "last_message_time": now,
             "booking_step": None,
             "temp_phone": None,
+            "temp_name": None,
+            "temp_day": None,
         }
 
     st = SESSIONS[user_id]
@@ -406,27 +408,44 @@ def add_user_message(user_id, text):
     phone = extract_phone(text)
     name = extract_name(text)
     day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
-    # 🟢 حالة: كان داز رقم سابق وكمل الاسم/اليوم
-if st.get("booking_step") == "waiting_details" and (name or day):
-    phone = st.get("temp_phone")
-    msgs = get_last_messages(user_id)
-    booking = analyze_booking(phone, msgs)
 
-    send_message(user_id, booking["ai_message"])
-    save_booking_to_sheet(booking)
-    send_whatsapp_booking(
-        booking["patient_name"],
-        booking["patient_phone"],
-        booking["date"],
-        booking["time"]
-    )
+    # 🟢 مرحلة انتظار التفاصيل
+    if st["booking_step"] == "waiting_details":
 
-    st["booking_step"] = None
-    st["temp_phone"] = None
-    return
-    
-    # ✅ إذا داز رقم + اسم أو يوم → ثبت مباشرة
-    if phone and (name or day):
+        if name:
+            st["temp_name"] = name
+
+        if day:
+            st["temp_day"] = text
+
+        # ✅ إذا اكتملت كل المعلومات
+        if st["temp_phone"] and st["temp_name"] and st["temp_day"]:
+            msgs = get_last_messages(user_id)
+            booking = analyze_booking(st["temp_phone"], msgs)
+
+            send_message(user_id, booking["ai_message"])
+            save_booking_to_sheet(booking)
+            send_whatsapp_booking(
+                booking["patient_name"],
+                booking["patient_phone"],
+                booking["date"],
+                booking["time"]
+            )
+
+            st["booking_step"] = None
+            st["temp_phone"] = None
+            st["temp_name"] = None
+            st["temp_day"] = None
+            return
+
+        send_message(
+            user_id,
+            "تمام 🌹 بعد نحتاج الاسم واليوم حتى نثبت الحجز"
+        )
+        return
+
+    # ✅ معلومات كاملة من أول رسالة
+    if phone and (name and day):
         msgs = get_last_messages(user_id)
         booking = analyze_booking(phone, msgs)
 
@@ -440,17 +459,17 @@ if st.get("booking_step") == "waiting_details" and (name or day):
         )
         return
 
-    # 🟡 إذا داز رقم بس → اسأله وبس
+    # 🟡 رقم فقط
     if phone:
         st["temp_phone"] = phone
         st["booking_step"] = "waiting_details"
         send_message(
             user_id,
-            "تمام 🌹 وصلنا رقمك، تحب أي يوم يناسبك للحجز؟ واسم المراجع شنو؟"
+            "تمام 🌹 وصلنا رقمك، شنو اسم المراجع؟ وأي يوم يناسبك للحجز؟"
         )
         return
 
-    # 🔵 إذا ماكو رقم → دردشة طبيعية
+    # 🔵 دردشة عادية
     threading.Thread(
         target=schedule_reply,
         args=(user_id,),
