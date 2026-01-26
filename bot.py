@@ -435,6 +435,17 @@ def extract_relative_day(text):
         return (today + timedelta(days=2)).strftime("%Y-%m-%d")
 
     return None
+CONFIRM_WORDS = [
+    "تأكيد",
+    "اوكي",
+    "أوكي",
+    "تمام",
+    "اي",
+    "نعم",
+    "ثبت",
+    "ثبتوه",
+    "موافق"
+]
 
 
 def add_user_message(user_id, text):
@@ -458,12 +469,17 @@ def add_user_message(user_id, text):
     phone = extract_phone(text)
     raw_name = extract_name(text)
     name = clean_name_from_day_words(raw_name)
-    explicit_day = any(d in text for d in ["السبت","الأحد","الاثنين","الثلاثاء","الأربعاء","الخميس"])
+    DAY_ALIASES = ["الاثنين","الثلاثاء","الاربعاء","الأربعاء","الخميس","السبت","الأحد"]
+    explicit_day = any(d in normalize_numbers(text) for d in DAY_ALIASES)
+
     relative_day = extract_relative_day(text)
+
 
     # 🟡 مرحلة تأكيد الحجز
     if st["booking_step"] == "waiting_confirmation":
-        if any(k in text for k in ["تأكيد", "اوكي", "تمام", "اي", "ثبت", "موافق"]):
+        normalized_text = normalize_numbers(text)
+        if any(word in normalized_text for word in CONFIRM_WORDS):
+
             booking = st["pending_booking"]
 
             send_message(user_id, booking["ai_message"])
@@ -553,8 +569,19 @@ def add_user_message(user_id, text):
     if phone:
         st["temp_phone"] = phone
         st["booking_step"] = "waiting_details"
-        send_message(user_id, "تمام 🌹 شنو اسم المراجع؟ وأي يوم يناسبك للحجز؟")
+
+        missing = []
+        if not st["temp_name"]:
+            missing.append("اسم المراجع")
+        if not st["temp_day"]:
+            missing.append("اليوم المناسب")
+
+        send_message(
+            user_id,
+            f"تمام 🌹 ممكن تذكر {' و '.join(missing)}؟"
+        )
         return
+
 
     # 🔵 دردشة عادية
     threading.Thread(
