@@ -478,8 +478,8 @@ def add_user_message(user_id, text):
     # 🟡 مرحلة تأكيد الحجز
     if st["booking_step"] == "waiting_confirmation":
         normalized_text = normalize_numbers(text)
-        if any(word in normalized_text for word in CONFIRM_WORDS):
 
+        if any(word in normalized_text for word in CONFIRM_WORDS):
             booking = st["pending_booking"]
 
             send_message(user_id, booking["ai_message"])
@@ -497,6 +497,8 @@ def add_user_message(user_id, text):
             send_message(user_id, "إذا تحب نغيّر اليوم أو الاسم، گلي 🌹")
         return
 
+
+
     # 🟢 مرحلة انتظار التفاصيل
     if st["booking_step"] == "waiting_details":
 
@@ -508,6 +510,13 @@ def add_user_message(user_id, text):
             st["temp_day"] = text
         if relative_day:
             st["temp_day"] = relative_day
+
+        # تثبيت الاسم واليوم لو جانوا برسالة منفصلة
+        if name and not st["temp_name"]:
+            st["temp_name"] = name
+
+        if (explicit_day or relative_day) and not st["temp_day"]:
+            st["temp_day"] = relative_day if relative_day else text
 
         if st["temp_phone"] and st["temp_name"] and st["temp_day"]:
             msgs = get_last_messages(user_id)
@@ -541,29 +550,6 @@ def add_user_message(user_id, text):
         send_message(user_id, f"تمام 🌹 بعد نحتاج {' و '.join(missing)}")
         return
 
-    # ✅ معلومات كاملة من أول رسالة
-    if phone and name and (explicit_day or relative_day):
-        msgs = get_last_messages(user_id)
-        booking = analyze_booking(
-            phone,
-            msgs,
-            forced_date=relative_day if relative_day else None
-        )
-
-        st["pending_booking"] = booking
-        st["booking_step"] = "waiting_confirmation"
-
-        send_message(
-            user_id,
-            f"""تمام 🌹
-راح نثبت الحجز بهالتفاصيل:
-الاسم: {booking['patient_name']}
-اليوم: {booking['date']}
-الوقت: 4 العصر
-
-اكتب (تأكيد) حتى نثبت الموعد 🌹"""
-        )
-        return
 
     # 🟡 رقم فقط
     if phone:
