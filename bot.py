@@ -21,12 +21,14 @@ client = OpenAI(api_key=OPENAI_API_KEY)
 # ⚙️ SETTINGS
 # =======================================================
 BUFFER_DELAY = 15
-MEMORY_TIMEOUT = 1800   # 30 دقيقة
-HISTORY_LIMIT = 12      # limit للـ history (structured)
+MEMORY_TIMEOUT = 3600   # ساعة 
+HISTORY_LIMIT = 24      # limit للـ history (structured)
 REQUEST_TIMEOUT = 10    # seconds (Meta + OpenAI)
 SESSION_CLEAN_AFTER = 3600   # ساعة
 DUP_MSG_CLEAN_AFTER = 600    # 10 دقائق
 CLEANER_SLEEP = 600          # كل 10 دقائق
+TYPING_DELAY = 4        # بعد 4 ثواني يبين typing
+TYPING_REFRESH = 8      # كل 8 ثواني نعيد typing_on حتى ما ينطفي
 
 # =======================================================
 # 📊 MEMORY
@@ -82,17 +84,19 @@ def ensure_session(user_id: str):
     now = time.time()
     st = SESSIONS.get(user_id)
 
-    if (not st) or (now - st.get("last_message_time", 0) > MEMORY_TIMEOUT):
+    if (not st) or (now - (st.get("last_message_time", 0)) > MEMORY_TIMEOUT):
         SESSIONS[user_id] = {
             "history": [],
-            "last_message_time": now,
+            "last_message_time": now,   # وقت آخر رسالة مستخدم
             "msg_version": 0,
             "last_reply": "",
             "pending_texts": [],
-            "pending_since": None
+            "pending_since": None,      # ✅ فاصلة هنا
+            "is_typing": False,
+            "typing_version": 0
         }
-    # ✅ لا تحدّث last_message_time هنا
     return
+
 
 
 
@@ -217,6 +221,13 @@ def send_typing(receiver):
     params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": receiver}, "sender_action": "typing_on"}
     safe_post(url, params=params, json=payload, retries=1)
+def send_typing_off(receiver):
+    if not PAGE_ACCESS_TOKEN:
+        return
+    url = "https://graph.facebook.com/v18.0/me/messages"
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    payload = {"recipient": {"id": receiver}, "sender_action": "typing_off"}
+    safe_post(url, params=params, json=payload, retries=1)
 
 # =======================================================
 # ✉️ Send Message
@@ -247,7 +258,7 @@ def ask_openai_chat(user_id, text):
 1. جاوب على آخر جملة سألها المراجع فقط.
 2. إذا المراجع سأل عدة أسئلة في الرسالة الأخيرة، جاوب عليها باختصار.
 3. لا تكرر إجابات قمت بكتابتها في السياق السابق.
-4. الرد حصراً باللهجة العراقية وبحد أقصى 30 كلمة.
+4. الرد حصراً باللهجة العراقية وبحد أقصى 60 كلمة.
 - اقرأ سياق المحادثة فقط للفهم، وجاوب حصراً على السؤال الموجود بآخر رسالة، ولا تعيد أسعار أو معلومات ذُكرت سابقاً إلا إذا طُلبت صراحة.
 - لا ترحب إلا إذا المراجع رحّب.
 - إذا ما عندك معلومة دقيقة: كُول "نحددها بعد المعاينة المجانية".
@@ -339,29 +350,86 @@ def schedule_reply(user_id, version_snapshot):
     if now - st.get("last_message_time", 0) < BUFFER_DELAY:
         return
 
-    # ✅ اسحب الدفعة المتجمعة كنص واحد
+    # اسحب الدفعة المتجمعة كنص واحد
     batch_text = drain_pending_batch(user_id)
     if not batch_text:
         return
 
-    send_typing(user_id)
+    # ✅ إذا typing بعده ما اشتغل (مثلاً المستخدم كتب رسالة وحدة وردّنا بسرعة)
+    # شغله هسه قبل ما ننادي OpenAI
+    if not st.get("is_typing"):
+        send_typing(user_id)
+        st["is_typing"] = True
 
     reply = ask_openai_chat(user_id, batch_text)
     if not reply:
+        # طفي typing إذا شغال
+        if st.get("is_typing"):
+            send_typing_off(user_id)
+            st["is_typing"] = False
         return
 
     # منع تكرار نفس الرد حرفياً
     if reply.strip() == (st.get("last_reply") or "").strip():
+        if st.get("is_typing"):
+            send_typing_off(user_id)
+            st["is_typing"] = False
         return
 
     append_history(user_id, "assistant", reply)
     st["last_reply"] = reply
+
+    # ✅ طفي typing قبل الإرسال
+    if st.get("is_typing"):
+        send_typing_off(user_id)
+        st["is_typing"] = False
+
     send_message(user_id, reply)
+
+
 
 
 # =======================================================
 # 🧾 add_user_message (كاملة)
 # =======================================================
+def schedule_typing(user_id: str, typing_snapshot: int):
+    # انتظر 4 ثواني
+    time.sleep(TYPING_DELAY)
+
+    st = SESSIONS.get(user_id)
+    if not st:
+        return
+
+    # إذا اجت رسالة أحدث، هذا التايمر ينعزل
+    if st.get("typing_version") != typing_snapshot:
+        return
+
+    # إذا خلال الـ 4 ثواني خلص التجميع (يعني ردّينا)، لا تفعل typing
+    # (هنا نعتمد على is_typing يتصفّر بعد الرد)
+    if st.get("is_typing"):
+        return
+
+    # شغّل typing
+    send_typing(user_id)
+    st["is_typing"] = True
+
+    # ✅ تحديث typing كل فترة حتى ما ينطفي بواجهة المستخدم
+    while True:
+        time.sleep(TYPING_REFRESH)
+        st2 = SESSIONS.get(user_id)
+        if not st2:
+            return
+
+        # إذا ردّينا/وقفنا typing، نطلع
+        if not st2.get("is_typing"):
+            return
+
+        # إذا صارت رسالة أحدث وتبدل typing_version، نطلع ويجي تايمر جديد
+        if st2.get("typing_version") != typing_snapshot:
+            return
+
+        send_typing(user_id)
+
 def add_user_message(user_id, text):
     ensure_session(user_id)
     st = SESSIONS[user_id]
@@ -369,12 +437,25 @@ def add_user_message(user_id, text):
     # خزن بالهيستري (للسياق)
     append_history(user_id, "user", text)
 
-    # ✅ خزن بالباتش (للتجميع الحقيقي)
+    # خزن بالباتش (للتجميع الحقيقي)
     push_pending(user_id, text)
 
     st["last_message_time"] = time.time()
 
-    # version counter يلغي أي Thread قديم
+    # ✅ جهّز typing بعد 4 ثواني
+    st["typing_version"] += 1
+    tver = st["typing_version"]
+
+    # اذا typing شغال من قبل، خليه (لا تسوي شي)
+    # اذا مو شغال، سوّي تايمر يشغله بعد 4 ثواني
+    if not st.get("is_typing"):
+        threading.Thread(
+            target=schedule_typing,
+            args=(user_id, tver),
+            daemon=True
+        ).start()
+
+    # version counter يلغي أي Thread قديم للرد
     st["msg_version"] += 1
     current_version = st["msg_version"]
 
@@ -383,6 +464,7 @@ def add_user_message(user_id, text):
         args=(user_id, current_version),
         daemon=True
     ).start()
+
 
 
 # =======================================================
