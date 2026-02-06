@@ -84,16 +84,17 @@ def ensure_session(user_id: str):
 
     if (not st) or (now - st.get("last_message_time", 0) > MEMORY_TIMEOUT):
         SESSIONS[user_id] = {
-            "history": [],          # structured
+            "history": [],
             "last_message_time": now,
-            "msg_version": 0,       # لمنع الرد المزدوج
+            "msg_version": 0,
             "last_reply": "",
-            # ✅ NEW: pending batch
             "pending_texts": [],
             "pending_since": None
         }
-    else:
-        st["last_message_time"] = now
+    # ✅ لا تحدّث last_message_time هنا
+    return
+
+
 
 
 def append_history(user_id: str, role: str, text: str):
@@ -150,6 +151,61 @@ def drain_pending_batch(user_id: str):
 
     merged = "\n".join(items).strip()
     return merged if merged else None
+def safe_get(url, *, params=None, timeout=REQUEST_TIMEOUT, retries=1):
+    last_err = None
+    for _ in range(max(1, retries + 1)):
+        try:
+            r = requests.get(url, params=params, timeout=timeout)
+            if r.status_code >= 400:
+                raise requests.HTTPError(f"HTTP {r.status_code}: {r.text[:200]}")
+            return r
+        except Exception as e:
+            last_err = e
+            time.sleep(0.4)
+    print("safe_get failed:", last_err)
+    return None
+
+
+_AR_DIGITS = str.maketrans({
+    "٠":"0","١":"1","٢":"2","٣":"3","٤":"4","٥":"5","٦":"6","٧":"7","٨":"8","٩":"9",
+    "۰":"0","۱":"1","۲":"2","۳":"3","۴":"4","۵":"5","۶":"6","۷":"7","۸":"8","۹":"9",
+})
+
+def extract_iraqi_phone(text: str):
+    """
+    يلتقط رقم عراقي 11 رقم يبدأ 07
+    يدعم الأرقام العربية/الفارسية والإنكليزية
+    """
+    if not text:
+        return None
+
+    t = text.translate(_AR_DIGITS)
+
+    # خلي كل غير الأرقام مسافات حتى نلقط تسلسلات أرقام
+    cleaned = []
+    for ch in t:
+        cleaned.append(ch if ch.isdigit() else " ")
+    cleaned = "".join(cleaned)
+
+    # لقط أي كتلة أرقام وفتّش عن 07 + 9 أرقام (11 رقم)
+    for part in cleaned.split():
+        if len(part) == 11 and part.startswith("07") and part.isdigit():
+            return part
+
+    return None
+
+
+def notify_callmebot(phone: str):
+    """
+    يرسل إشعار الى CallMeBot يحتوي الرقم ونص تثبيت الحجز
+    """
+    url = "http://api.callmebot.com/text.php"
+    msg = f"يرجى الاتصال على الرقم {phone} لتثبيت الحجز النهائي"
+    params = {
+        "user": "ahmedalnafy",
+        "text": msg
+    }
+    safe_get(url, params=params, retries=1)
 
 # =======================================================
 # ✍️ Typing Indicator
@@ -330,7 +386,7 @@ def add_user_message(user_id, text):
 
 
 # =======================================================
-# 📡 WEBHOOK
+# 📡 WEBHOOK (GET verification)
 # =======================================================
 @app.route("/webhook", methods=["GET"])
 def verify():
@@ -338,6 +394,9 @@ def verify():
         return request.args.get("hub.challenge")
     return "Error", 403
 
+# =======================================================
+# 📡 WEBHOOK (POST messages)
+# =======================================================
 @app.route("/webhook", methods=["POST"])
 def webhook():
     data = request.get_json(silent=True) or {}
@@ -351,6 +410,9 @@ def webhook():
                     continue
 
                 msg = ev.get("message", {})
+                if msg.get("is_echo"):
+                    continue
+
                 msg_id = msg.get("mid")
 
                 # منع تكرار نفس الرسالة
@@ -361,13 +423,20 @@ def webhook():
 
                 # نص
                 if "text" in msg:
-                    add_user_message(user_id, msg.get("text", ""))
+                    txt = msg.get("text", "")
+
+                    # ✅ إذا بيها رقم عراقي 11 رقم يبدي 07 (عربي/إنكليزي) بلغ CallMeBot فوراً
+                    phone = extract_iraqi_phone(txt)
+                    if phone:
+                        notify_callmebot(phone)
+
+                    add_user_message(user_id, txt)
 
                 # مرفقات
                 elif "attachments" in msg:
                     send_message(
                         user_id,
-                        "عاشت ايدك، اني رد تلقائي ما اكدر ارد على الصور او المسجات الصوتية , راح نبلغ القسم المختص  . وراح نرد على حضرتك بأقرب وقت إن شاء الله 🌹"
+                        "عاشت ايدك، اني رد تلقائي ما اكدر ارد على الصور او المسجات الصوتية، راح نبلغ القسم المختص ونرد بأقرب وقت 🌹"
                     )
 
     except Exception as e:
@@ -375,7 +444,7 @@ def webhook():
 
     return "OK", 200
 
+
 if __name__ == "__main__":
-    # Render/Hosting Platforms غالباً يمررون PORT بالـ env
     port = int(os.getenv("PORT", "10000"))
     app.run(host="0.0.0.0", port=port)
