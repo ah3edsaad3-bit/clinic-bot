@@ -4,8 +4,9 @@ from openai import OpenAI
 import time
 import os
 import threading
-import random
-from threading import Lock
+import re
+import json
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -17,119 +18,327 @@ PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 client = OpenAI(api_key=OPENAI_API_KEY)
 
+WHATSAPP_URL = (
+    "https://api.callmebot.com/whatsapp.php?"
+    "phone=9647818931201&apikey=8423339&text="
+)
+
+BOOKING_API_URL = "https://script.google.com/macros/s/AKfycbznSh6PeJodzuAqObqo9_kWIfgLoZHhrJ97C4pEXCXwD9JD4s3wZ9I93MRl0ot6d36-1g/exec"
+
 # =======================================================
-# 📊 MEMORY + ANTI DUP
+# 📊 MEMORY
 # =======================================================
 SESSIONS = {}
-PROCESSED_MESSAGES = {}  # لمنع تكرار نفس mid
+PROCESSED_MESSAGES = {}  # لمنع تكرار الردود
+BUFFER_DELAY = 15
 MEMORY_TIMEOUT = 1800  # 30 دقيقة
-
-# =======================================================
-# 🧠 SMART BATCHING + "TYPING" SMART WAIT
-# =======================================================
-BUFFER_DELAY = 15        # زمن التجميع: إذا ماكو رسائل جديدة خلاله نرد
-TYPING_ON_AFTER = 4      # لا تشغل typing_on فوراً
-TYPING_GRACE = 3         # فحص أخير قبل الإرسال: إذا وصلت رسالة جديدة، نلغي
-
-USER_LOCKS = {}
-USER_SEQ = {}  # رقم تسلسلي لكل مستخدم حتى آخر thread بس يرد
-
-
-def get_user_lock(uid):
-    if uid not in USER_LOCKS:
-        USER_LOCKS[uid] = Lock()
-    return USER_LOCKS[uid]
-
-
-def build_batched_text(history, since_index):
-    batch = history[since_index:]
-    return "\n".join([f"- {m}" for m in batch if m and m.strip()])
-
-
+DAILY_MESSAGES = 0
 # =======================================================
 # 🔥 AUTO CLEANER
 # =======================================================
 def cleaner_daemon():
     while True:
         now = time.time()
-
         # تنظيف الجلسات القديمة
         for uid in list(SESSIONS.keys()):
-            try:
-                if now - SESSIONS[uid]["last_message_time"] > MEMORY_TIMEOUT:
-                    del SESSIONS[uid]
-                    USER_SEQ.pop(uid, None)
-                    USER_LOCKS.pop(uid, None)
-            except Exception:
-                # إذا صارت مشكلة ببيانات جلسة معينة، احذفها
+            if now - SESSIONS[uid]["last_message_time"] > 3600:
                 del SESSIONS[uid]
-                USER_SEQ.pop(uid, None)
-                USER_LOCKS.pop(uid, None)
-
-        # تنظيف سجل الرسائل المكررة
+        # تنظيف سجل الرسائل المكررة (لحماية الذاكرة)
         for mid in list(PROCESSED_MESSAGES.keys()):
-            if now - PROCESSED_MESSAGES[mid] > 600:
+            if now - PROCESSED_MESSAGES[mid] > 600: # حذف بعد 10 دقائق
                 del PROCESSED_MESSAGES[mid]
-
         time.sleep(600)
 
-
 threading.Thread(target=cleaner_daemon, daemon=True).start()
+
 
 # =======================================================
 # ✍️ Typing Indicator
 # =======================================================
-def send_typing_on(receiver):
+def send_typing(receiver):
     if not PAGE_ACCESS_TOKEN:
         return
+
     url = "https://graph.facebook.com/v18.0/me/messages"
     params = {"access_token": PAGE_ACCESS_TOKEN}
     payload = {"recipient": {"id": receiver}, "sender_action": "typing_on"}
-    try:
-        requests.post(url, params=params, json=payload, timeout=10)
-    except:
-        pass
+    requests.post(url, params=params, json=payload)
 
-
-def send_typing_off(receiver):
-    if not PAGE_ACCESS_TOKEN:
-        return
-    url = "https://graph.facebook.com/v18.0/me/messages"
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    payload = {"recipient": {"id": receiver}, "sender_action": "typing_off"}
-    try:
-        requests.post(url, params=params, json=payload, timeout=10)
-    except:
-        pass
 
 # =======================================================
-# ✉️ Send Message
+# 🔢 Utility Functions
 # =======================================================
-def send_message(receiver, text):
-    if not PAGE_ACCESS_TOKEN:
+def normalize_numbers(text):
+    arabic = "٠١٢٣٤٥٦٧٨٩"
+    english = "0123456789"
+    return text.translate(str.maketrans(arabic, english))
+
+
+def extract_phone(text):
+    text = normalize_numbers(text)
+    m = re.findall(r"07\d{9}", text)
+    return m[0] if m else None
+
+
+def extract_name(text):
+    t = normalize_numbers(text)
+    cleaned = ''.join([c if not c.isdigit() else ' ' for c in t])
+    return cleaned.strip() if len(cleaned.strip()) > 1 else None
+# =======================================================
+# 📅 Day Keywords (حتى تنشال من الاسم)
+# =======================================================
+DAY_WORDS = [
+    "اليوم",
+    "باجر",
+    "عكب",
+    "عكب باجر",
+    "ورا",
+    "ورا باچر",
+    "بعد",
+    "بعد باچر",
+    "الاثنين",
+    "الثلاثاء",
+    "الأربعاء",
+    "الخميس",
+    "السبت",
+    "الأحد"
+]
+def clean_name_from_day_words(name):
+    if not name:
+        return name
+
+    parts = name.split()
+    cleaned = []
+
+    for p in parts:
+        if p not in DAY_WORDS:
+            cleaned.append(p)
+
+    return " ".join(cleaned).strip() if cleaned else None
+
+
+# =======================================================
+# 📅 Next weekday name → date
+# =======================================================
+def next_weekday_by_name(day_name):
+    days = {
+        "monday": 0, "tuesday": 1, "wednesday": 2,
+        "thursday": 3, "friday": 4, "saturday": 5, "sunday": 6,
+        "الاثنين": 0, "الثلاثاء": 1, "الاربعاء": 2, "الأربعاء": 2,
+        "الخميس": 3, "الجمعة": 4, "السبت": 5, "الاحد": 6, "الأحد": 6,
+    }
+
+    dn = day_name.strip().lower()
+    if dn not in days:
+        return None
+
+    target = days[dn]
+    today = datetime.now()
+    diff = target - today.weekday()
+    if diff <= 0:
+        diff += 7
+
+    result = today + timedelta(days=diff)
+    return result.strftime("%Y-%m-%d")
+
+
+# =======================================================
+# 📅 Default date = tomorrow unless Friday → Saturday
+# =======================================================
+def get_default_date():
+    today = datetime.now()
+    d = today + timedelta(days=1)
+
+    if d.weekday() == 4:  # Friday
+        d += timedelta(days=1)
+
+    return d.strftime("%Y-%m-%d")
+
+
+# =======================================================
+# 🧠 Chat Delay Reply
+# =======================================================
+def schedule_reply(user_id):
+    time.sleep(BUFFER_DELAY)
+    st = SESSIONS.get(user_id)
+    if not st:
         return
-    params = {"access_token": PAGE_ACCESS_TOKEN}
-    url = "https://graph.facebook.com/v18.0/me/messages"
-    payload = {"recipient": {"id": receiver}, "message": {"text": text}}
+
+    now = time.time()
+    if now - st["last_message_time"] >= BUFFER_DELAY:
+        send_typing(user_id)
+        last_msg = st["history"][-1]
+        reply = ask_openai_chat(user_id, last_msg)
+        if reply:
+            send_message(user_id, reply)
+
+
+# =======================================================
+# 📥 Last Messages
+# =======================================================
+def get_last_messages(user_id, limit=10):
+    return SESSIONS.get(user_id, {}).get("history", [])[-limit:]
+
+
+# =======================================================
+# 🤖 Booking Engine
+# =======================================================
+def convert_to_12h(time_str):
     try:
-        requests.post(url, params=params, json=payload, timeout=10)
+        t = datetime.strptime(time_str, "%H:%M")
+        return t.strftime("%I:%M").lstrip("0")  # مثال → 4:00
     except:
-        pass
+        return time_str
+def analyze_booking(phone, last_msgs, forced_date=None):
+    history = "\n".join(last_msgs)
+
+    day_name_ar = {
+        0: "الاثنين",
+        1: "الثلاثاء",
+        2: "الأربعاء",
+        3: "الخميس",
+        4: "الجمعة",
+        5: "السبت",
+        6: "الأحد"
+    }
+
+
+    prompt = f"""
+اقرأ المحادثة بتركيز واستخرج معلومات الموعد.
+المهمة الأساسية: استخراج اسم المراجع (الشخص الذي يريد العلاج) وليس اسم الدكتور أو العيادة.
+
+المخرجات JSON فقط:
+{{
+ "patient_name": "اسم المراجع الصريح فقط",
+ "patient_phone": "{phone}",
+ "service": "معاينة مجانية",
+ "day_name": "اليوم المذكور",
+ "time": "HH:MM"
+}}
+
+ملاحظات:
+- إذا لم يذكر المراجع اسمه صراحة (مثلاً: "اسمي أحمد" أو "أحجز لـ سارة")، اجعل قيمة patient_name "غير محدد".
+- لا تستخدم عبارات مثل "أريد أحجز" كاسم.
+"""
+
+    try:
+        rsp = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": prompt},
+                {"role": "user", "content": f"المحادثة:\n{history}"}
+            ],
+            temperature=0
+        )
+        
+        # تنظيف الرد من أي علامات Markdown
+        clean_content = re.sub(r"json|
+", "", rsp.choices[0].message.content).strip()
+        data = json.loads(clean_content)
+
+        # إذا لم ينجح GPT في معرفة الاسم، نتركه "بدون اسم"
+        patient_name = data.get("patient_name")
+        if not patient_name or patient_name == "غير محدد":
+            patient_name = "بدون اسم"
+        day_name = data.get("day_name", "").strip()
+        time_str = "16:00"
+
+        # 🔥 تحويل الوقت إلى صيغة 12 ساعة بدون AM/PM
+        time_12h = convert_to_12h(time_str)
+
+        # 🔥 حساب التاريخ
+        # 🔥 حساب التاريخ (الأولوية للتاريخ الجاهز)
+        if forced_date:
+            date = forced_date
+        elif day_name:
+            date = next_weekday_by_name(day_name) or get_default_date()
+        else:
+            date = get_default_date()
+
+
+        day_index = datetime.strptime(date, "%Y-%m-%d").weekday()
+        day_label = day_name_ar[day_index]
+
+        # 🔥 صياغة الرسالة النهائية
+        ai_msg = (
+            "تم تثبيت موعدك ❤\n"
+            f"الاسم: {patient_name}\n"
+            f"رقم الهاتف: {phone}\n"
+            f"الخدمة: معاينة مجانية\n"
+            f"التاريخ: {date} ({day_label})\n"
+            f"الوقت: {time_12h}\n"
+            "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين"
+        )
+
+        return {
+            "patient_name": patient_name,
+            "patient_phone": phone,
+            "service": "معاينة مجانية",
+            "date": date,
+            "time": time_str,
+            "ai_message": ai_msg
+        }
+
+    except:
+        fallback_date = get_default_date()
+        fallback_time = "16:00"
+        fallback_time12 = convert_to_12h(fallback_time)
+
+        return {
+            "patient_name": "بدون اسم",
+            "patient_phone": phone,
+            "service": "معاينة مجانية",
+            "date": fallback_date,
+            "time": fallback_time,
+            "ai_message":
+                f"تم تثبيت موعدك ❤\n"
+                f"الاسم: بدون اسم\n"
+                f"رقم الهاتف: {phone}\n"
+                f"التاريخ: {fallback_date} ({day_name_ar[datetime.strptime(fallback_date, '%Y-%m-%d').weekday()]})\n"
+                f"الوقت: {fallback_time12}\n"
+                "العنوان: بغداد / زيونة / شارع الربيعي الخدمي / داخل كراج مجمع اسطنبول / عيادة كولدن لاين"
+        }
+
+
+
+# =======================================================
+# 🧾 Save Booking into Sheet
+# =======================================================
+def save_booking_to_sheet(b):
+    payload = {
+        "action": "addBooking",
+        "name": b["patient_name"],
+        "phone": b["patient_phone"],
+        "service": b["service"],
+        "date": b["date"],
+        "time": b["time"],
+        "status": "Pending"
+    }
+    requests.post(BOOKING_API_URL, json=payload)
+
+
+# =======================================================
+# 📤 WhatsApp Booking Notification
+# =======================================================
+def send_whatsapp_booking(name, phone, date, time_):
+    msg = (
+        "حجز جديد:\n"
+        f"الاسم: {name}\n"
+        f"الرقم: {phone}\n"
+        f"التاريخ: {date}\n"
+        f"الوقت: {time_}"
+    )
+    url = WHATSAPP_URL + requests.utils.quote(msg)
+    requests.get(url)
+
 
 # =======================================================
 # 🤖 Chat Engine (Ali)
 # =======================================================
-def ask_openai_chat(user_id, batched_text):
+def ask_openai_chat(user_id, text):
     st = SESSIONS[user_id]
-
-    # ✅ context الصحيح: فقط قبل الدفعة الحالية
-    batch_start = st.get("batch_start_index", 0)
-    old_context_list = st["history"][:batch_start]
-    context = " | ".join(old_context_list) if old_context_list else "لا يوجد سياق سابق"
-
-    # ✅ ذاكرة ردود: آخر رد/ردين
-    recent_replies = st.get("recent_replies", [])
-    last_replies_text = " | ".join(recent_replies[-2:]) if recent_replies else "لا يوجد ردود سابقة"
+    # نأخذ آخر 5 رسائل فقط للسياق لتقليل التشتت
+    context = " | ".join(st["history"][:-1]) if len(st["history"]) > 1 else "لا يوجد سياق سابق"
 
     prompt = """
 اسمك علي، موظف في عيادة كولدن لاين. 
@@ -193,159 +402,193 @@ def ask_openai_chat(user_id, batched_text):
 - ضمان جودة العمل مدى الحياة.
 - الزراعة الفورية بدون فتح لثة ويتم انجازها خلال 72 ساعة فقط.
 - تغليف الاسنان بجلستين , حشوة الجذر من جلستين الى ثلاثة.
-بخصوص الحجز ( تقوم باتمام عملية الحجز كاملة مع المراجع وتثبيت الموعد لة بطلب الاسم ورقم الهاتف وتخلي الحجزات ضمن ايام واوقات الدوام فقط ) وتبلغ المراجعين ان سوف يتم الاتصال بهم لتثبيت الموعد النهائي
-
-
 """
 
     try:
         rsp = client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o", # أنصحك باستخدام gpt-4o للسرعة والدقة
             messages=[
                 {"role": "system", "content": prompt},
-                {"role": "user", "content": f"السياق السابق للمحادثة (قبل الدفعة الحالية): {context}"},
-                {"role": "user", "content": f"آخر ردود منك حتى لا تكرر: {last_replies_text}"},
-                {"role": "user", "content": f"الرسائل الجديدة (مجموعة خلال {BUFFER_DELAY} ثانية) المطلوب الرد عليها الآن:\n{batched_text}"}
+                {"role": "assistant", "content": f"السياق السابق للمحادثة: {context}"},
+                {"role": "user", "content": f"الرسالة الجديدة المطلوب الرد عليها الآن: {text}"}
             ],
-            temperature=0.3,
+            temperature=0.3 # تقليل الـ temperature يجعل الرد رزيناً ومباشراً
         )
         return rsp.choices[0].message.content.strip()
     except:
         return "صار خلل بسيط، عاود رسالتك ♥"
 
-# =======================================================
-# 🧠 Smart Batched Reply Scheduler
-# =======================================================
-def schedule_reply(user_id, seq):
-    # ننتظر لحد ما يخلص التجميع
-    time.sleep(BUFFER_DELAY)
-
-    lock = get_user_lock(user_id)
-
-    with lock:
-        st = SESSIONS.get(user_id)
-        if not st:
-            return
-
-        # إذا اكو رسالة أحدث، هذا الثريد قديم
-        if USER_SEQ.get(user_id, 0) != seq:
-            return
-
-        # لازم يكون صار سكون كامل BUFFER_DELAY
-        if time.time() - st["last_message_time"] < BUFFER_DELAY:
-            return
-
-        batch_start = st.get("batch_start_index", 0)
-        batched_text = build_batched_text(st["history"], batch_start)
-        if not batched_text.strip():
-            return
-
-    # typing_on بشكل أهدأ
-    time.sleep(TYPING_ON_AFTER)
-
-    # فحص: إذا المستخدم رجع كتب أثناء الانتظار، نلغي
-    with lock:
-        st = SESSIONS.get(user_id)
-        if not st:
-            return
-        if USER_SEQ.get(user_id, 0) != seq:
-            return
-        if time.time() - st["last_message_time"] < BUFFER_DELAY:
-            return
-
-    send_typing_on(user_id)
-
-    # Grace أخير قبل الإرسال
-    time.sleep(TYPING_GRACE)
-
-    with lock:
-        st = SESSIONS.get(user_id)
-        if not st:
-            send_typing_off(user_id)
-            return
-        if USER_SEQ.get(user_id, 0) != seq:
-            send_typing_off(user_id)
-            return
-        if time.time() - st["last_message_time"] < BUFFER_DELAY:
-            send_typing_off(user_id)
-            return
-
-        # أعِد بناء الدفعة لأن ممكن انضافت رسائل قبل السكون النهائي
-        batch_start = st.get("batch_start_index", 0)
-        batched_text = build_batched_text(st["history"], batch_start)
-
-    reply = ask_openai_chat(user_id, batched_text)
-    if not reply:
-        send_typing_off(user_id)
-        return
-
-    with lock:
-        st = SESSIONS.get(user_id)
-        if not st:
-            send_typing_off(user_id)
-            return
-
-        # منع تكرار نفس الرد
-        if reply == st.get("last_reply", ""):
-            reply = random.choice([
-                "تمام وصلتني، خلي أتأكد وأرجعلك ✅",
-                "دقيقة بس وأرد عليك 🌿",
-                "وصلت، هسه أرتّبلك الجواب 🌸"
-            ])
-
-        st["last_reply"] = reply
-
-        # ✅ خزّن آخر الردود (ردين)
-        if "recent_replies" not in st:
-            st["recent_replies"] = []
-        st["recent_replies"].append(reply)
-        st["recent_replies"] = st["recent_replies"][-2:]
-
-        # بعد ما نرد: الدفعة القادمة تبدأ من آخر التاريخ
-        st["batch_start_index"] = len(st["history"])
-
-    send_message(user_id, reply)
-    send_typing_off(user_id)
 
 # =======================================================
 # 📥 Core Handler
 # =======================================================
+def extract_relative_day(text):
+    t = normalize_numbers(text)
+    today = datetime.now()
+
+    if "اليوم" in t:
+        return today.strftime("%Y-%m-%d")
+
+    if "باجر" in t and not ("عكب" in t or "ورا" in t or "بعد" in t):
+        return (today + timedelta(days=1)).strftime("%Y-%m-%d")
+
+    if "ورا باچر" in t or "بعد باچر" in t or "عكب باجر" in t:
+        return (today + timedelta(days=2)).strftime("%Y-%m-%d")
+
+    return None
+CONFIRM_WORDS = [
+    "تأكيد",
+    "اوكي",
+    "أوكي",
+    "تمام",
+    "اي",
+    "نعم",
+    "ثبت",
+    "ثبتوه",
+    "موافق"
+]
+
+
 def add_user_message(user_id, text):
     now = time.time()
-    lock = get_user_lock(user_id)
 
-    with lock:
-        # إنشاء جلسة جديدة إذا مو موجودة أو منتهية
-        if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT):
-            SESSIONS[user_id] = {
-                "history": [],
-                "last_message_time": now,
-                "last_reply": "",
-                "batch_start_index": 0,
-                "recent_replies": [],  # ✅ ذاكرة ردود
-            }
+    if user_id not in SESSIONS or (now - SESSIONS[user_id]["last_message_time"] > MEMORY_TIMEOUT):
+        SESSIONS[user_id] = {
+            "history": [],
+            "last_message_time": now,
+            "booking_step": None,
+            "temp_phone": None,
+            "temp_name": None,
+            "temp_day": None,
+            "pending_booking": None,
+        }
 
-        st = SESSIONS[user_id]
+    st = SESSIONS[user_id]
+    st["history"].append(text)
+    st["last_message_time"] = now
 
-        # إذا صار timeout اعتبرها محادثة جديدة
-        if (now - st["last_message_time"]) > MEMORY_TIMEOUT:
-            st["history"] = []
-            st["batch_start_index"] = 0
-            st["last_reply"] = ""
-            st["recent_replies"] = []  # ✅ تصفير ذاكرة الردود
+    phone = extract_phone(text)
+    raw_name = extract_name(text)
+    name = clean_name_from_day_words(raw_name)
+    DAY_ALIASES = ["الاثنين","الثلاثاء","الاربعاء","الأربعاء","الخميس","السبت","الأحد"]
+    explicit_day = any(d in normalize_numbers(text) for d in DAY_ALIASES)
 
-        # إذا كانت آخر رسالة قبل مدة أطول من BUFFER_DELAY، اعتبرها دفعة جديدة
-        if (now - st["last_message_time"]) > BUFFER_DELAY:
-            st["batch_start_index"] = len(st["history"])
+    relative_day = extract_relative_day(text)
 
-        st["history"].append(text)
-        st["last_message_time"] = now
 
-        # seq يمنع تعدد threads ويضمن آخر واحد بس يرد
-        USER_SEQ[user_id] = USER_SEQ.get(user_id, 0) + 1
-        my_seq = USER_SEQ[user_id]
+    # 🟡 مرحلة تأكيد الحجز
+    if st["booking_step"] == "waiting_confirmation":
+        normalized_text = normalize_numbers(text)
 
-    threading.Thread(target=schedule_reply, args=(user_id, my_seq), daemon=True).start()
+        if any(word in normalized_text for word in CONFIRM_WORDS):
+            booking = st["pending_booking"]
+
+            send_message(user_id, booking["ai_message"])
+            save_booking_to_sheet(booking)
+            send_whatsapp_booking(
+                booking["patient_name"],
+                booking["patient_phone"],
+                booking["date"],
+                booking["time"]
+            )
+
+            st["booking_step"] = None
+            st["pending_booking"] = None
+        else:
+            send_message(user_id, "إذا تحب نغيّر اليوم أو الاسم، گلي 🌹")
+        return
+
+
+
+    # 🟢 مرحلة انتظار التفاصيل
+    if st["booking_step"] == "waiting_details":
+
+        if phone:
+            st["temp_phone"] = phone
+        if name:
+            st["temp_name"] = name
+        if explicit_day:
+            st["temp_day"] = text
+        if relative_day:
+            st["temp_day"] = relative_day
+
+        # تثبيت الاسم واليوم لو جانوا برسالة منفصلة
+        if name and not st["temp_name"]:
+            st["temp_name"] = name
+
+        if (explicit_day or relative_day) and not st["temp_day"]:
+            st["temp_day"] = relative_day if relative_day else text
+
+        if st["temp_phone"] and st["temp_name"] and st["temp_day"]:
+            msgs = get_last_messages(user_id)
+            booking = analyze_booking(
+                st["temp_phone"],
+                msgs,
+                forced_date=st["temp_day"] if "-" in st["temp_day"] else None
+            )
+
+            st["pending_booking"] = booking
+            st["booking_step"] = "waiting_confirmation"
+
+            send_message(
+                user_id,
+                f"""تمام 🌹
+راح نثبت الحجز بهالتفاصيل:
+الاسم: {booking['patient_name']}
+اليوم: {booking['date']}
+الوقت: 4 العصر
+
+اكتب (تأكيد) حتى نثبت الموعد 🌹"""
+            )
+            return
+
+        missing = []
+        if not st["temp_name"]:
+            missing.append("الاسم")
+        if not st["temp_day"]:
+            missing.append("اليوم")
+
+        send_message(user_id, f"تمام 🌹 بعد نحتاج {' و '.join(missing)}")
+        return
+
+
+    # 🟡 رقم فقط
+    if phone:
+        st["temp_phone"] = phone
+        st["booking_step"] = "waiting_details"
+
+        missing = []
+        if not st["temp_name"]:
+            missing.append("اسم المراجع")
+        if not st["temp_day"]:
+            missing.append("اليوم المناسب")
+
+        send_message(
+            user_id,
+            f"تمام 🌹 ممكن تذكر {' و '.join(missing)}؟"
+        )
+        return
+
+
+    # 🔵 دردشة عادية
+    threading.Thread(
+        target=schedule_reply,
+        args=(user_id,),
+        daemon=True
+    ).start()
+
+
+
+
+# =======================================================
+# ✉️ Send Message
+# =======================================================
+def send_message(receiver, text):
+    params = {"access_token": PAGE_ACCESS_TOKEN}
+    url = "https://graph.facebook.com/v18.0/me/messages"
+    payload = {"recipient": {"id": receiver}, "message": {"text": text}}
+    requests.post(url, params=params, json=payload)
+
 
 # =======================================================
 # 📡 WEBHOOK
@@ -356,41 +599,23 @@ def verify():
         return request.args.get("hub.challenge")
     return "Error", 403
 
-
 @app.route("/webhook", methods=["POST"])
 def webhook():
-    data = request.get_json() or {}
-
+    data = request.get_json()
     for entry in data.get("entry", []):
         for ev in entry.get("messaging", []):
-            sender = ev.get("sender", {})
-            user_id = sender.get("id")
-            if not user_id:
-                continue
-
-            msg = ev.get("message", {}) or {}
-            msg_id = msg.get("mid")
-
-            # Anti-dup على مستوى رسالة فيسبوك
+            user_id = ev["sender"]["id"]
+            msg_id = ev.get("message", {}).get("mid")
+            
             if msg_id:
-                if msg_id in PROCESSED_MESSAGES:
-                    continue
+                if msg_id in PROCESSED_MESSAGES: continue
                 PROCESSED_MESSAGES[msg_id] = time.time()
 
-            # نص
-            if "text" in msg:
-                add_user_message(user_id, msg["text"])
-
-            # مرفقات
-            elif msg.get("attachments"):
-                send_typing_off(user_id)
-                send_message(
-                    user_id,
-                    "عاشت ايدك، وصلت الصورة 🌹 راح نعرضها للدكتور ونرجعلك بأقرب وقت."
-                )
-
+            if "message" in ev and "text" in ev["message"]:
+                add_user_message(user_id, ev["message"]["text"])
+            elif "message" in ev and "attachments" in ev["message"]:
+                send_message(user_id, "عاشت ايدك، وصلت الصورة وراح ندزها للدكتور. راح يطلع عليها ونطيك التفاصيل باقرب وقت إن شاء الله 🌹")
     return "OK", 200
-
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
